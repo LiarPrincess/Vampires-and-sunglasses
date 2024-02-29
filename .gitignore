@@ -1,0 +1,11 @@
+*.pyc
+.DS_Store
+.build
+
+asyncio
+swift-system-main
+swift-experimental-subprocess
+Semaphore-main
+Sources/Apple
+Other
+POST
