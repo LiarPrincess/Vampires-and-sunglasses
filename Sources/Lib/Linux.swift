@@ -304,6 +304,8 @@ private enum ThreadedMort {
     if result != 0 {
       fatalError("Process wait thread: creation failed.")
     }
+
+// TODO: Join thread. But I don't care in this toy lib.
   }
 
   fileprivate static func callProcessTerminationCallback(pid: pid_t, exitStatus: CInt) async {
