@@ -1,0 +1,13 @@
+included:
+  - Sources/App
+  - Sources/Lib
+
+# Try to stay below 80
+line_length:
+  warning: 100
+  error: 120
+
+disabled_rules:
+  - todo
+  - identifier_name
+  - blanket_disable_command
