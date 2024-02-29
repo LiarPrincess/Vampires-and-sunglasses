@@ -2,6 +2,7 @@ import Foundation
 import SystemPackage
 
 // swiftlint:disable function_body_length
+// swiftlint:disable cyclomatic_complexity
 
 extension Subprocess {
 

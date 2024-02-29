@@ -262,6 +262,7 @@ extension Subprocess {
       }
     }
 
+  // swiftlint:disable:next nesting
     private enum ReadResult {
       case ok(byteCount: Int)
       case noDataAvailableOnNonBlockingFile
