@@ -176,7 +176,7 @@ public actor Subprocess {
   ///
   /// - Returns: The exit status.
   @discardableResult
-  public func wait() async throws -> CInt {
+  public func waitForTermination() async throws -> CInt {
     try Task.checkCancellation()
 
     switch self.state {
@@ -254,7 +254,7 @@ public actor Subprocess {
   ///
   /// - Returns: The exit status.
   @discardableResult
-  public func readAllFromPipesAndWait() async throws -> CInt {
+  public func readPipesAndWaitForTermination() async throws -> CInt {
     // Read stdout/stderr in parallel as we do not know to which one the process
     // writes. We can do this because those are 2 different pipes.
     // 'withThrowingDiscardingTaskGroup' is only on macOS 14.0+
@@ -264,7 +264,7 @@ public actor Subprocess {
       try await group.waitForAll()
     }
 
-    return try await self.wait()
+    return try await self.waitForTermination()
   }
 
   private enum TerminateAfterResult<R> {
@@ -299,7 +299,7 @@ public actor Subprocess {
     // Returns 'false' if already terminated.
     try self.terminate()
     // Synchronize. Returns immediately if already terminated.
-    try await self.wait()
+    try await self.waitForTermination()
 
     try Task.checkCancellation()
 

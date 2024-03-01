@@ -37,7 +37,7 @@ func kill() async throws {
     try await process.kill()
   }
 
-  let status = try await process.wait()
+  let status = try await process.waitForTermination()
   print("Exit status:", status)
   assert(status == -9)
 }
@@ -46,7 +46,7 @@ func kill() async throws {
 func wait_fullSleep() async throws {
   print("\n=== wait ===")
   let process = try sleep(seconds: 1)
-  let status = try await process.wait()
+  let status = try await process.waitForTermination()
   print("Exit status:", status)
   assert(status == 0)
 }
@@ -57,18 +57,18 @@ func wait_lateCancellation() async throws {
   let process = try sleep(seconds: 2)
 
   let cancelledTask = Task.detached {
-    let status = try? await process.wait()
+    let status = try? await process.waitForTermination()
     print("Exit status:", status, "<-- cancelled task")
     assert(status == nil)
   }
 
-  // Wait until it hits 'process.wait()'
+  // Wait until it hits 'process.waitForTermination()'
   try await Task.sleep(nanoseconds: 1 * second)
   print("Cancelling task")
   cancelledTask.cancel()
 
   // Just sync.
-  let status = try await process.wait()
+  let status = try await process.waitForTermination()
   print("Exit status:", status, "<-- main task")
   assert(status == 0)
 }
@@ -80,20 +80,20 @@ func wait_multipleTasks() async throws {
   let semaphore = Semaphore()
 
   Task.detached {
-    let status = try await process.wait()
+    let status = try await process.waitForTermination()
     print("Exit status:", status, "<-- task 1")
     assert(status == 0)
     await semaphore.signal()
   }
 
   Task.detached {
-    let status = try await process.wait()
+    let status = try await process.waitForTermination()
     print("Exit status:", status, "<-- task 2")
     assert(status == 0)
     await semaphore.signal()
   }
 
-  let status = try await process.wait()
+  let status = try await process.waitForTermination()
   print("Exit status:", status, "<-- main task")
   assert(status == 0)
 
@@ -106,12 +106,12 @@ func wait_afterTermination() async throws {
   let process = try sleep(seconds: 2)
 
   print("Waiting BEFORE termination")
-  let status0 = try await process.wait()
+  let status0 = try await process.waitForTermination()
   print("Exit status:", status0)
   assert(status0 == 0)
 
   print("Waiting AFTER termination")
-  let status1 = try await process.wait()
+  let status1 = try await process.waitForTermination()
   print("Exit status:", status1)
   assert(status1 == 0)
 }
@@ -128,7 +128,7 @@ func terminateAfter() async throws {
     print("Diggy diggy hole, diggy diggy hole")
   }
 
-  let status = try await process.wait()
+  let status = try await process.waitForTermination()
   print("Exit status:", status)
   assert(status == -15)
 }
@@ -175,7 +175,7 @@ private func prideAndPrejudice_readAll() async throws {
     print("Decoding failed?")
   }
 
-  let status = try await process.wait()
+  let status = try await process.waitForTermination()
   print("Exit status:", status)
   assert(status == 0)
 }
@@ -185,7 +185,7 @@ private func prideAndPrejudice_discardAndWait() async throws {
   let process = try catPrideAndPrejudice(stdout: .pipe)
 
   print("readAllFromPipesAndWait()")
-  let status = try await process.readAllFromPipesAndWait()
+  let status = try await process.readPipesAndWaitForTermination()
   print("Exit status:", status)
   assert(status == 0)
 }
@@ -196,7 +196,7 @@ private func prideAndPrejudice_deadlockWhenPipeIsFull() async throws {
 
 /*
   let process = try catPrideAndPrejudice(stdout: .pipe)
-  let status = try await process.wait() // Hangs
+  let status = try await process.waitForTermination() // Hangs
 */
 }
 
@@ -217,7 +217,7 @@ private func prideAndPrejudice_copy() async throws {
     stdout: .file(file, close: true)
   )
 
-  let status = try await process.wait()
+  let status = try await process.waitForTermination()
   print("Exit status:", status)
   assert(status == 0)
 }
