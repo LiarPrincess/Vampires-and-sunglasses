@@ -281,16 +281,21 @@ internal func SYSTEM_WAIT_FOR_TERMINATION_IN_BACKGROUND(process: Subprocess) {
 @MainActor
 private enum ThreadedMort {
 
-  private static var pidToRunningProcess = [pid_t: Subprocess]()
+  private struct SubprocessInfo {
+    fileprivate let process: Subprocess
+    fileprivate let threadId: pthread_t
+  }
+
+  private static var pidToInfo = [pid_t: SubprocessInfo]()
 
   fileprivate static func startWaiting(for process: Subprocess) {
     let pid = process.pid
-    Self.pidToRunningProcess[pid] = process
     print("[\(pid)] Starting termination watcher.")
 
     let args = UnsafeMutablePointer<pid_t>.allocate(capacity: 1)
     args.initialize(to: process.pid)
 
+// TODO: Things here may not be correct. Review later.
 // TODO: Low priority/QoS? This leads to priority inversion, but it is implied anyway.
 
 #if os(macOS)
@@ -305,21 +310,34 @@ private enum ThreadedMort {
       fatalError("Process wait thread: creation failed.")
     }
 
-// TODO: Join thread. But I don't care in this toy lib.
+#if os(macOS)
+    guard let threadId = threadId else {
+      fatalError("Process wait thread: creation failed - no threadId.")
+    }
+#endif
+
+    Self.pidToInfo[pid] = SubprocessInfo(process: process, threadId: threadId)
   }
 
   fileprivate static func callProcessTerminationCallback(pid: pid_t, exitStatus: CInt) async {
     print("[\(pid)] Terminated, status: \(exitStatus).")
 
-    guard let process = Self.pidToRunningProcess[pid] else {
+    guard let info = Self.pidToInfo[pid] else {
       fatalError("Process wait thread: no process?")
     }
 
     // We no longer wait for the process.
-    Self.pidToRunningProcess[pid] = nil
+    Self.pidToInfo[pid] = nil
 
     // Mort assumes the duties of Death. (Spoiler!)
-    await process.TERMINATION_CALLBACK(exitStatus: exitStatus)
+    await info.process.TERMINATION_CALLBACK(exitStatus: exitStatus)
+
+    // 'join' duration should be ~650 ns
+    // let start = DispatchTime.now()
+    var result: UnsafeMutableRawPointer?
+    pthread_join(info.threadId, &result)
+    // let duration = DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds
+    // print("[\(pid)] 'waitpid' thread: joined in \(duration) ns.")
   }
 }
 

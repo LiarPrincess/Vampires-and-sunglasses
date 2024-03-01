@@ -122,10 +122,9 @@ func terminateAfter() async throws {
   let process = try sleep(seconds: 24 * 60 * 60) // 24h, lets hope it works!
 
   try await process.terminateAfter {
-    // Doing important work: https://www.youtube.com/watch?v=34CZjsEI1yU
-    print("I am a dwarf and I'm digging a hole")
-    try await Task.sleep(nanoseconds: 1 * second)
-    print("Diggy diggy hole, diggy diggy hole")
+    print("Terminate after - doing important work…")
+    try await Task.sleep(nanoseconds: 3 * second)
+    print("Terminate after - finished")
   }
 
   let status = try await process.waitForTermination()
