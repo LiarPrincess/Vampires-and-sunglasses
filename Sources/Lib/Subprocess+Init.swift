@@ -9,29 +9,29 @@ extension Subprocess {
   public enum InitStdin: Sendable {
     /// No input.
     case none
-    /// Send to `Subprocess.stdin`.
-    case pipe(sizeInBytes: CInt?)
+    /// Read from `Subprocess.stdin` in the current process.
+    case readFromPipe(pipeSizeInBytes: CInt?)
     /// Read from file.
-    case file(_ fd: FileDescriptor, close: Bool)
+    case readFromFile(_ fd: FileDescriptor, close: Bool)
 
-    /// Send to `Subprocess.stdin`.
-    public static var pipe: Self { .pipe(sizeInBytes: nil) }
+    /// Read from `Subprocess.stdin` in the current process.
+    public static var readFromPipe: Self { .readFromPipe(pipeSizeInBytes: nil) }
     /// Read from file.
-    public static func file(_ fd: FileDescriptor) -> Self { .file(fd, close: true) }
+    public static func readFromFile(_ fd: FileDescriptor) -> Self { .readFromFile(fd, close: true) }
   }
 
   public enum InitStdout: Sendable {
     /// Send to the black hole.
     case discard
-    /// Send to `Subprocess.stdout` or `Subprocess.stderr`.
-    case pipe(sizeInBytes: CInt?)
+    /// Write to `Subprocess.stdout` or `Subprocess.stderr` in the current process.
+    case writeToPipe(pipeSizeInBytes: CInt?)
     /// Write to file.
-    case file(_ fd: FileDescriptor, close: Bool)
+    case writeToFile(_ fd: FileDescriptor, close: Bool)
 
-    /// Send to `Subprocess.stdout` or `Subprocess.stderr`.
-    public static var pipe: Self { .pipe(sizeInBytes: nil) }
+    /// Write to `Subprocess.stdout` or `Subprocess.stderr` in the current process.
+    public static var writeToPipe: Self { .writeToPipe(pipeSizeInBytes: nil) }
     /// Write to file.
-    public static func file(_ fd: FileDescriptor) -> Self { .file(fd, close: true) }
+    public static func writeToFile(_ fd: FileDescriptor) -> Self { .writeToFile(fd, close: true) }
   }
 
   public typealias InitStderr = InitStdout
@@ -87,20 +87,20 @@ extension Subprocess {
 
     switch stdinArg {
     case .none: break
-    case .pipe: break
-    case let .file(fd, close): if close { filesToClose.append(fd) }
+    case .readFromPipe: break
+    case let .readFromFile(fd, close): if close { filesToClose.append(fd) }
     }
 
     switch stdoutArg {
     case .discard: break
-    case .pipe: break
-    case let .file(fd, close): if close { filesToClose.append(fd) }
+    case .writeToPipe: break
+    case let .writeToFile(fd, close): if close { filesToClose.append(fd) }
     }
 
     switch stderrArg {
     case .discard: break
-    case .pipe: break
-    case let .file(fd, close): if close { filesToClose.append(fd) }
+    case .writeToPipe: break
+    case let .writeToFile(fd, close): if close { filesToClose.append(fd) }
     }
 
     // =============
@@ -117,7 +117,7 @@ extension Subprocess {
         stdin = try sharedDiscardFile()
         stdinWriter = nil
 
-      case let .pipe(sizeInBytes):
+      case let .readFromPipe(sizeInBytes):
         let p = try FileDescriptor.pipe()
         stdin = p.readEnd
         stdinWriter = p.writeEnd
@@ -127,7 +127,7 @@ extension Subprocess {
         try Self.setNonBlocking(p.writeEnd)
         try Self.setPipeBufferSize(writeEnd: p.writeEnd, sizeInBytes: sizeInBytes)
 
-      case let .file(fd, _):
+      case let .readFromFile(fd, _):
         stdin = fd
         stdinWriter = nil
       }
@@ -147,7 +147,7 @@ extension Subprocess {
         let fd = try sharedDiscardFile()
         return (fd, nil)
 
-      case let .pipe(sizeInBytes):
+      case let .writeToPipe(sizeInBytes):
         let (readEnd, writeEnd) = try FileDescriptor.pipe()
         filesToClose.append(readEnd)
         childPipesToClose.append(writeEnd)
@@ -156,7 +156,7 @@ extension Subprocess {
         try Self.setPipeBufferSize(writeEnd: writeEnd, sizeInBytes: sizeInBytes)
         return (writeEnd, readEnd)
 
-      case let .file(fd, _):
+      case let .writeToFile(fd, _):
         return (fd, nil)
       }
     }
@@ -207,7 +207,7 @@ extension Subprocess {
 
     self.init(
       pid: pid,
-      stdinWriter: stdinWriter,
+      stdinNonBlockingWriter: stdinWriter,
       stdoutNonBlockingReader: stdoutNonBlockingReader,
       stderrNonBlockingReader: stderrNonBlockingReader,
       filesToClose: filesToClose

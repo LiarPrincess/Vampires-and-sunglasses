@@ -78,7 +78,7 @@ public actor Subprocess {
 
   internal init(
     pid: pid_t,
-    stdinWriter: FileDescriptor?,
+    stdinNonBlockingWriter stdinWriter: FileDescriptor?,
     stdoutNonBlockingReader stdoutReader: FileDescriptor?,
     stderrNonBlockingReader stderrReader: FileDescriptor?,
     filesToClose: [FileDescriptor]
@@ -99,8 +99,8 @@ public actor Subprocess {
 
   deinit {
     // Explicitly empty :)
-    // Did you know that actor->deinit is called in async manner?
-    // So the actor instances are not scope based. They live a little bit longer.
+    // Did you know that actor->deinit is called in 'async' manner?
+    // Actor instances are not scope based. They live a little bit longer.
   }
 
   /// Terminate the process with `SIGTERM`.
