@@ -9,6 +9,10 @@ import SystemPackage
 
 // swiftlint:disable nesting
 
+private let stdinIsNotPipeError = "Subprocess.stdin can only be used if 'readFromPipe' was selected during initialization."
+private let stdoutIsNotPipeError = "Subprocess.stdout can only be used if 'writeToPipe' was selected during initialization."
+private let stderrIsNotPipeError = "Subprocess.stderr can only be used if 'writeToPipe' was selected during initialization."
+
 public actor Subprocess {
 
   private enum State {
@@ -48,11 +52,20 @@ public actor Subprocess {
   internal static let exitStatusIfWeDontKnowTheRealOne: CInt =  255
 
   public let pid: pid_t
+
+  private let _stdin: Input?
+  private let _stdout: Output?
+  private let _stderr: Output?
+
   /// Useful only if you specified `pipe` during creation.
   ///
   /// Possible race if you do not `await` writes from multiple `tasks` before
   /// termination. In general all IO operations should belong to a single `Task`.
-  public let stdin: Input
+  public var stdin: Input {
+    guard let s = self._stdin else { preconditionFailure(stdinIsNotPipeError) }
+    return s
+  }
+
   /// Useful only if you specified `pipe` during creation.
   ///
   /// Reads are non-blocking, meaning that they will return immediately if there
@@ -60,7 +73,11 @@ public actor Subprocess {
   ///
   /// This object can be used after the process termination. This allows reading
   /// the data collected in the pipe buffer after the is no longer running.
-  public let stdout: Output
+  public var stdout: Output {
+    guard let s = self._stdout else { preconditionFailure(stdoutIsNotPipeError) }
+    return s
+  }
+
   /// Useful only if you specified `pipe` during creation.
   ///
   /// Reads are non-blocking, meaning that they will return immediately if there
@@ -68,7 +85,11 @@ public actor Subprocess {
   ///
   /// This object can be used after the process termination. This allows reading
   /// the data collected in the pipe buffer after the is no longer running.
-  public let stderr: Output
+  public var stderr: Output {
+    guard let s = self._stderr else { preconditionFailure(stderrIsNotPipeError) }
+    return s
+  }
+
   /// Suspended `Tasks` waiting for termination.
   private var suspensions = [Suspension]()
   /// Files to close after the termination.
@@ -84,9 +105,9 @@ public actor Subprocess {
     filesToClose: [FileDescriptor]
   ) {
     self.pid = pid
-    self.stdin = Input(file: stdinWriter)
-    self.stdout = Output(nonBlockingFile: stdoutReader)
-    self.stderr = Output(nonBlockingFile: stderrReader)
+    self._stdin = stdinWriter.map(Input.init(nonBlockingFile:))
+    self._stdout = stdoutReader.map(Output.init(nonBlockingFile:))
+    self._stderr = stderrReader.map(Output.init(nonBlockingFile:))
 
     for fd in filesToClose {
       let isExcluded = fd == stdinWriter || fd == stdoutReader || fd == stderrReader
@@ -246,7 +267,7 @@ public actor Subprocess {
 
   /// Wait for the child process to terminate.
   ///
-  /// 1. Read all data from `stdout` and `stderr`.
+  /// 1. Read the data from `stdout` and `stderr` until end-of-file is reached.
   /// 2. Wait for the process to terminate.
   ///
   /// This should be the only `wait` we expose, but I like the idea of having
@@ -254,13 +275,21 @@ public actor Subprocess {
   ///
   /// - Returns: The exit status.
   @discardableResult
-  public func readPipesAndWaitForTermination() async throws -> CInt {
+  public func readOutputAndWaitForTermination() async throws -> CInt {
     // Read stdout/stderr in parallel as we do not know to which one the process
     // writes. We can do this because those are 2 different pipes.
-    // 'withThrowingDiscardingTaskGroup' is only on macOS 14.0+
+    @Sendable
+    func readAllDiscardingResult(_ o: Output?) async throws {
+      do {
+        try await o?.readAllDiscardingResult()
+      } catch Errno.badFileDescriptor {
+        // File is closed.
+      }
+    }
+
     try await withThrowingTaskGroup(of: Void.self) { group in
-      group.addTask { try await self.stdout.readAllDiscardingResult() }
-      group.addTask { try await self.stderr.readAllDiscardingResult() }
+      group.addTask { try await readAllDiscardingResult(self._stdout) }
+      group.addTask { try await readAllDiscardingResult(self._stderr) }
       try await group.waitForAll()
     }
 
@@ -320,12 +349,12 @@ public actor Subprocess {
     print("[\(self.pid)] Closing files.")
 
     // Stdin can be closed without any problems.
-    try? await self.stdin.close()
+    try? await self._stdin?.close()
 
     // 'Stdout' and 'stderr' can't be closed now as writes are stored in the buffer
     // and we want to allow the user to read this buffer even after the termination.
-    await self.stdout.markProcessAsTerminated()
-    await self.stderr.markProcessAsTerminated()
+    await self._stdout?.markProcessAsTerminated()
+    await self._stderr?.markProcessAsTerminated()
 
     for file in self.filesToCloseWithoutStdinStdoutStderr {
       // Ignore errors.

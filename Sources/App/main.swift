@@ -58,7 +58,7 @@ func wait_lateCancellation() async throws {
 
   let cancelledTask = Task.detached {
     let status = try? await process.waitForTermination()
-    print("Exit status:", status, "<-- cancelled task")
+    print("Exit status:", status.map(String.init) ?? "nil", "<-- cancelled task")
     assert(status == nil)
   }
 
@@ -184,7 +184,7 @@ private func prideAndPrejudice_discardAndWait() async throws {
   let process = try catPrideAndPrejudice(stdout: .writeToPipe)
 
   print("readAllFromPipesAndWait()")
-  let status = try await process.readPipesAndWaitForTermination()
+  let status = try await process.readOutputAndWaitForTermination()
   print("Exit status:", status)
   assert(status == 0)
 }

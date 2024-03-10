@@ -4,21 +4,15 @@ import SystemPackage
 /// Wrapper for `FileDescriptor` because actors do not support protocols/inheritance.
 private struct File {
 
-  /// `nil` if user has not specified `pipe` or the file was closed by the
-  /// `idempotentClose` method.
-  fileprivate var fd: FileDescriptor?
+  private var fd: FileDescriptor
+  private var isClosed = false
 
-  fileprivate init(_ fd: FileDescriptor?) {
+  fileprivate init(_ fd: FileDescriptor) {
     self.fd = fd
   }
 
-  fileprivate func checkCancellationAndGetFile() throws -> FileDescriptor {
+  fileprivate func getFileDescriptorUnlessCancelled() throws -> FileDescriptor {
     try Task.checkCancellation()
-
-    guard let fd = self.fd else {
-      throw Errno.badFileDescriptor
-    }
-
     return fd
   }
 
@@ -28,9 +22,9 @@ private struct File {
   //
   // We want to prevent double-close.
   fileprivate mutating func idempotentClose() throws {
-    if let fd = self.fd {
-      // Set to `nil` before closing to prevent double closing on 'throw'.
-      self.fd = nil
+    if !self.isClosed {
+      // Set flag before closing to prevent double closing on 'throw'.
+      self.isClosed = true
       try fd.close()
     }
   }
@@ -42,7 +36,7 @@ extension Subprocess {
 
     private var file: File
 
-    internal init(file fd: FileDescriptor?) {
+    internal init(nonBlockingFile fd: FileDescriptor) {
       self.file = File(fd)
     }
 
@@ -80,7 +74,7 @@ extension Subprocess {
     public func write(buffer: UnsafeRawBufferPointer) throws -> Int? {
       do {
 // TODO: Split into PIPE_BUF chunks
-        let fd = try self.file.checkCancellationAndGetFile()
+        let fd = try self.file.getFileDescriptorUnlessCancelled()
         return try fd.write(buffer)
       } catch Errno.wouldBlock, Errno.resourceTemporarilyUnavailable {
         return nil
@@ -100,7 +94,7 @@ extension Subprocess {
     ) throws -> Int? where S.Element == UInt8 {
       do {
 // TODO: Split into PIPE_BUF chunks
-        let fd = try self.file.checkCancellationAndGetFile()
+        let fd = try self.file.getFileDescriptorUnlessCancelled()
         return try fd.writeAll(sequence)
       } catch Errno.wouldBlock, Errno.resourceTemporarilyUnavailable {
         return nil
@@ -156,6 +150,7 @@ extension Subprocess {
       }
     }
 
+    /// Idempotent close.
     public func close() throws {
       try self.file.idempotentClose()
     }
@@ -166,7 +161,7 @@ extension Subprocess {
     private var file: File
     private var hasProcessTerminated = false
 
-    internal init(nonBlockingFile fd: FileDescriptor?) {
+    internal init(nonBlockingFile fd: FileDescriptor) {
       self.file = File(fd)
     }
 
@@ -187,7 +182,7 @@ extension Subprocess {
     /// - Returns: The number of bytes that were read or `nil` if there is no
     /// data available.
     public func read(into buffer: UnsafeMutableRawBufferPointer) throws -> Int? {
-      let fd = try self.file.checkCancellationAndGetFile()
+      let fd = try self.file.getFileDescriptorUnlessCancelled()
 
       switch try self.read(fd, into: buffer) {
       case .ok(let byteCount): return byteCount
@@ -262,7 +257,7 @@ extension Subprocess {
       }
     }
 
-  // swiftlint:disable:next nesting
+    // swiftlint:disable:next nesting
     private enum ReadResult {
       case ok(byteCount: Int)
       case noDataAvailableOnNonBlockingFile
@@ -296,6 +291,7 @@ extension Subprocess {
       self.hasProcessTerminated = true
     }
 
+    /// Idempotent close.
     public func close() throws {
       try self.file.idempotentClose()
     }
