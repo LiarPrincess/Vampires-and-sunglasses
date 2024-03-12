@@ -121,7 +121,7 @@ func terminateAfter() async throws {
   print("\n=== terminateAfter ===")
   let process = try sleep(seconds: 24 * 60 * 60) // 24h, lets hope it works!
 
-  try await process.terminateAfter {
+  try await process.terminateAfter { @Sendable in
     print("Terminate after - doing important work…")
     try await Task.sleep(nanoseconds: 3 * second)
     print("Terminate after - finished")
@@ -183,7 +183,7 @@ private func prideAndPrejudice_discardAndWait() async throws {
   print("\n=== Pride and prejudice - Discard and wait ===")
   let process = try catPrideAndPrejudice(stdout: .writeToPipe)
 
-  print("readAllFromPipesAndWait()")
+  print("readOutputAndWaitForTermination()")
   let status = try await process.readOutputAndWaitForTermination()
   print("Exit status:", status)
   assert(status == 0)

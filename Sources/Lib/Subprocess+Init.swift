@@ -34,6 +34,7 @@ extension Subprocess {
     public static func writeToFile(_ fd: FileDescriptor) -> Self { .writeToFile(fd, close: true) }
   }
 
+  // TODO: stderr -> merge to stdout
   public typealias InitStderr = InitStdout
 
   /// Errors that occurred during `init`.
@@ -213,6 +214,7 @@ extension Subprocess {
       filesToClose: filesToClose
     )
 
+// TODO: await
     print("[\(pid)] \(executablePath)")
     SYSTEM_WAIT_FOR_TERMINATION_IN_BACKGROUND(process: self)
   }

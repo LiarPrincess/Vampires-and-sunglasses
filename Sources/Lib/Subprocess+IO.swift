@@ -4,11 +4,24 @@ import SystemPackage
 /// Wrapper for `FileDescriptor` because actors do not support protocols/inheritance.
 private struct File {
 
+  private typealias Flags = UInt8
+
+  private static let isClosedMask: Flags = 1 << 0
+  private static let hasProcessTerminatedMask: Flags = 1 << 1
+
   private var fd: FileDescriptor
-  private var isClosed = false
+  private var flags = Flags.zero
 
   fileprivate init(_ fd: FileDescriptor) {
     self.fd = fd
+  }
+
+  fileprivate var hasProcessTerminated: Bool {
+    return self.isSet(Self.hasProcessTerminatedMask)
+  }
+
+  fileprivate mutating func markProcessAsTerminated() {
+    self.set(Self.hasProcessTerminatedMask)
   }
 
   fileprivate func getFileDescriptorUnlessCancelled() throws -> FileDescriptor {
@@ -22,12 +35,15 @@ private struct File {
   //
   // We want to prevent double-close.
   fileprivate mutating func idempotentClose() throws {
-    if !self.isClosed {
+    if !self.isSet(Self.isClosedMask) {
       // Set flag before closing to prevent double closing on 'throw'.
-      self.isClosed = true
+      self.set(Self.isClosedMask)
       try fd.close()
     }
   }
+
+  private func isSet(_ f: Flags) -> Bool { (self.flags & f) == f }
+  private mutating func set(_ f: Flags) { self.flags = self.flags | f }
 }
 
 extension Subprocess {
@@ -159,7 +175,6 @@ extension Subprocess {
   public actor Output {
 
     private var file: File
-    private var hasProcessTerminated = false
 
     internal init(nonBlockingFile fd: FileDescriptor) {
       self.file = File(fd)
@@ -172,7 +187,7 @@ extension Subprocess {
       // If the process is still running we will allow writes to a pipe until:
       // a) process is terminated
       // b) pipe buffer is full - at which point we block the child process
-      if self.hasProcessTerminated {
+      if self.file.hasProcessTerminated {
         try? self.file.idempotentClose()
       }
     }
@@ -200,10 +215,9 @@ extension Subprocess {
     ///
     /// - Returns: Decoded `String` or `nil` if the decoding fails.
     public func readAll(encoding: String.Encoding) async throws -> String? {
-      let fd = try self.file.checkCancellationAndGetFile()
       var accumulator = Data()
 
-      try await self.readAll(fd) { (buffer: UnsafeMutableRawBufferPointer, count: Int) in
+      try await self.readAll() { (buffer: UnsafeMutableRawBufferPointer, count: Int) in
         let ptr = buffer.baseAddress!.assumingMemoryBound(to: UInt8.self)
         accumulator.append(ptr, count: count)
       }
@@ -211,19 +225,14 @@ extension Subprocess {
       return String(data: accumulator, encoding: encoding)
     }
 
-    /// Do nothing with the data.
+    /// Read and throw away all of the data. Closed file -> `EBADF`.
     internal func readAllDiscardingResult() async throws {
-      try Task.checkCancellation()
-
-      if let fd = self.file.fd {
-        try await self.readAll(fd) { (_, _) in }
-      }
+      try await self.readAll() { (_, _) in }
     }
 
-    private func readAll(
-      _ fd: FileDescriptor,
-      onDataRead: (UnsafeMutableRawBufferPointer, Int) -> Void
-    ) async throws {
+    private func readAll(onDataRead: (UnsafeMutableRawBufferPointer, Int) -> Void) async throws {
+      let fd = try self.file.getFileDescriptorUnlessCancelled()
+
       let count = 1024
       let buffer = UnsafeMutableRawBufferPointer.allocate(byteCount: count, alignment: 1)
       defer { buffer.deallocate() }
@@ -272,10 +281,10 @@ extension Subprocess {
         let byteCount = try fd.read(into: buffer)
         return .ok(byteCount: byteCount)
       } catch Errno.wouldBlock, Errno.resourceTemporarilyUnavailable {
-        //  EAGAIN The file descriptor fd refers to a file other than a
-        //         socket and has been marked nonblocking (O_NONBLOCK), and
-        //         the read would block.  See open(2) for further details on
-        //         the O_NONBLOCK flag.
+        // EAGAIN The file descriptor fd refers to a file other than a
+        //        socket and has been marked nonblocking (O_NONBLOCK), and
+        //        the read would block. See open(2) for further details on
+        //        the O_NONBLOCK flag.
         return .noDataAvailableOnNonBlockingFile
       } catch {
         // For example: somebody closed the file in different `Task`.
@@ -288,7 +297,7 @@ extension Subprocess {
     /// buffer after the process is terminated. They can call `close` if they
     /// really want to SIGPIPE the child (not recommended).
     internal func markProcessAsTerminated() {
-      self.hasProcessTerminated = true
+      self.file.markProcessAsTerminated()
     }
 
     /// Idempotent close.
