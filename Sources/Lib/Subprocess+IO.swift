@@ -206,6 +206,18 @@ extension Subprocess {
       }
     }
 
+    /// Read all of the data from the pipe.
+    public func readAll() async throws -> Data {
+      var result = Data()
+
+      try await self.readAll() { (buffer: UnsafeMutableRawBufferPointer, count: Int) in
+        let ptr = buffer.baseAddress!.assumingMemoryBound(to: UInt8.self)
+        result.append(ptr, count: count)
+      }
+
+      return result
+    }
+
     /// Read all of the data from the pipe and then decode the `String` using
     /// the specified `encoding`.
     ///
@@ -215,14 +227,8 @@ extension Subprocess {
     ///
     /// - Returns: Decoded `String` or `nil` if the decoding fails.
     public func readAll(encoding: String.Encoding) async throws -> String? {
-      var accumulator = Data()
-
-      try await self.readAll() { (buffer: UnsafeMutableRawBufferPointer, count: Int) in
-        let ptr = buffer.baseAddress!.assumingMemoryBound(to: UInt8.self)
-        accumulator.append(ptr, count: count)
-      }
-
-      return String(data: accumulator, encoding: encoding)
+      let data = try await self.readAll()
+      return String(data: data, encoding: encoding)
     }
 
     /// Read and throw away all of the data. Closed file -> `EBADF`.
