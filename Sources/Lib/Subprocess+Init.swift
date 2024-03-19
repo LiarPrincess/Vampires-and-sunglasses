@@ -10,12 +10,12 @@ extension Subprocess {
     /// No input.
     case none
     /// Read from `Subprocess.stdin` in the current process.
-    case readFromPipe(pipeSizeInBytes: CInt?)
+    case pipeFromParent(pipeSizeInBytes: CInt?)
     /// Read from file.
     case readFromFile(_ fd: FileDescriptor, close: Bool)
 
     /// Read from `Subprocess.stdin` in the current process.
-    public static var readFromPipe: Self { .readFromPipe(pipeSizeInBytes: nil) }
+    public static var pipeFromParent: Self { .pipeFromParent(pipeSizeInBytes: nil) }
     /// Read from file.
     public static func readFromFile(_ fd: FileDescriptor) -> Self { .readFromFile(fd, close: true) }
   }
@@ -24,17 +24,17 @@ extension Subprocess {
     /// Send to the black hole.
     case discard
     /// Write to `Subprocess.stdout` or `Subprocess.stderr` in the current process.
-    case writeToPipe(pipeSizeInBytes: CInt?)
+    case pipeToParent(pipeSizeInBytes: CInt?)
     /// Write to file.
     case writeToFile(_ fd: FileDescriptor, close: Bool)
 
     /// Write to `Subprocess.stdout` or `Subprocess.stderr` in the current process.
-    public static var writeToPipe: Self { .writeToPipe(pipeSizeInBytes: nil) }
+    public static var pipeToParent: Self { .pipeToParent(pipeSizeInBytes: nil) }
     /// Write to file.
     public static func writeToFile(_ fd: FileDescriptor) -> Self { .writeToFile(fd, close: true) }
   }
 
-  // TODO: stderr -> merge to stdout
+  // TODO: InitStderr.stdout that merges to stdout
   public typealias InitStderr = InitStdout
 
   /// Errors that occurred during `init`.
@@ -88,19 +88,19 @@ extension Subprocess {
 
     switch stdinArg {
     case .none: break
-    case .readFromPipe: break
+    case .pipeFromParent: break
     case let .readFromFile(fd, close): if close { filesToClose.append(fd) }
     }
 
     switch stdoutArg {
     case .discard: break
-    case .writeToPipe: break
+    case .pipeToParent: break
     case let .writeToFile(fd, close): if close { filesToClose.append(fd) }
     }
 
     switch stderrArg {
     case .discard: break
-    case .writeToPipe: break
+    case .pipeToParent: break
     case let .writeToFile(fd, close): if close { filesToClose.append(fd) }
     }
 
@@ -110,18 +110,18 @@ extension Subprocess {
 // TODO: O_CLOEXEC?
 
     let stdin: FileDescriptor
-    let stdinWriter: FileDescriptor?
+    let stdinNonBlockingWriter: FileDescriptor?
 
     do {
       switch stdinArg {
       case .none:
         stdin = try sharedDiscardFile()
-        stdinWriter = nil
+        stdinNonBlockingWriter = nil
 
-      case let .readFromPipe(sizeInBytes):
+      case let .pipeFromParent(sizeInBytes):
         let p = try FileDescriptor.pipe()
         stdin = p.readEnd
-        stdinWriter = p.writeEnd
+        stdinNonBlockingWriter = p.writeEnd
         childPipesToClose.append(p.readEnd)
         filesToClose.append(p.writeEnd)
         // Writing to full pipe should not block.
@@ -130,7 +130,7 @@ extension Subprocess {
 
       case let .readFromFile(fd, _):
         stdin = fd
-        stdinWriter = nil
+        stdinNonBlockingWriter = nil
       }
     } catch {
       try cleanupAndThrow(.IOError(error))
@@ -148,7 +148,7 @@ extension Subprocess {
         let fd = try sharedDiscardFile()
         return (fd, nil)
 
-      case let .writeToPipe(sizeInBytes):
+      case let .pipeToParent(sizeInBytes):
         let (readEnd, writeEnd) = try FileDescriptor.pipe()
         filesToClose.append(readEnd)
         childPipesToClose.append(writeEnd)
@@ -208,7 +208,7 @@ extension Subprocess {
 
     self.init(
       pid: pid,
-      stdinNonBlockingWriter: stdinWriter,
+      stdinNonBlockingWriter: stdinNonBlockingWriter,
       stdoutNonBlockingReader: stdoutNonBlockingReader,
       stderrNonBlockingReader: stderrNonBlockingReader,
       filesToClose: filesToClose

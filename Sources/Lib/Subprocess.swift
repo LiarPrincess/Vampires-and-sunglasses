@@ -9,9 +9,9 @@ import SystemPackage
 
 // swiftlint:disable nesting
 
-private let stdinIsNotPipeError = "Subprocess.stdin can only be used if 'readFromPipe' was selected during initialization."
-private let stdoutIsNotPipeError = "Subprocess.stdout can only be used if 'writeToPipe' was selected during initialization."
-private let stderrIsNotPipeError = "Subprocess.stderr can only be used if 'writeToPipe' was selected during initialization."
+private let stdinIsNotPipeError = "Subprocess.stdin can only be used if 'pipeFromParent' was selected during initialization."
+private let stdoutIsNotPipeError = "Subprocess.stdout can only be used if 'pipeToParent' was selected during initialization."
+private let stderrIsNotPipeError = "Subprocess.stderr can only be used if 'pipeToParent' was selected during initialization."
 
 public actor Subprocess {
 

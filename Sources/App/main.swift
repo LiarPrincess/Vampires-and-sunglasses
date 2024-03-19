@@ -165,7 +165,7 @@ private func catPrideAndPrejudice(
 
 private func prideAndPrejudice_readAll() async throws {
   print("\n=== Pride and prejudice - Read all ===")
-  let process = try catPrideAndPrejudice(stdout: .writeToPipe)
+  let process = try catPrideAndPrejudice(stdout: .pipeToParent)
 
   print("Read all")
   if let s = try await process.stdout.readAll(encoding: .utf8) {
@@ -181,7 +181,7 @@ private func prideAndPrejudice_readAll() async throws {
 
 private func prideAndPrejudice_discardAndWait() async throws {
   print("\n=== Pride and prejudice - Discard and wait ===")
-  let process = try catPrideAndPrejudice(stdout: .writeToPipe)
+  let process = try catPrideAndPrejudice(stdout: .pipeToParent)
 
   print("readOutputAndWaitForTermination()")
   let status = try await process.readOutputAndWaitForTermination()
@@ -213,7 +213,7 @@ private func prideAndPrejudice_copy() async throws {
   )
 
   let process = try catPrideAndPrejudice(
-    stdout: .writeToFile(file, close: true)
+    stdout: .writeToFile(file)
   )
 
   let status = try await process.waitForTermination()
