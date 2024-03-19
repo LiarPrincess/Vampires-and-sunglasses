@@ -7,21 +7,12 @@ private struct File {
   private typealias Flags = UInt8
 
   private static let isClosedMask: Flags = 1 << 0
-  private static let hasProcessTerminatedMask: Flags = 1 << 1
 
   private var fd: FileDescriptor
   private var flags = Flags.zero
 
   fileprivate init(_ fd: FileDescriptor) {
     self.fd = fd
-  }
-
-  fileprivate var hasProcessTerminated: Bool {
-    return self.isSet(Self.hasProcessTerminatedMask)
-  }
-
-  fileprivate mutating func markProcessAsTerminated() {
-    self.set(Self.hasProcessTerminatedMask)
   }
 
   fileprivate func getFileDescriptorUnlessCancelled() throws -> FileDescriptor {
@@ -174,22 +165,16 @@ extension Subprocess {
 
   public actor Output {
 
+    private typealias CloseContinuation = UnsafeContinuation<(), Never>
+
     private var file: File
+    /// Number of long running reads, used to delay closing the file.
+    private var pendingReadCount: Int32 = 0
+    /// Resume close after all of the pending reads finished.
+    private var closeContinuation: CloseContinuation?
 
     internal init(nonBlockingFile fd: FileDescriptor) {
       self.file = File(fd)
-    }
-
-    deinit {
-      // If the process was terminated then we will do the delayed close as the
-      // user can no longer read the buffered content.
-      //
-      // If the process is still running we will allow writes to a pipe until:
-      // a) process is terminated
-      // b) pipe buffer is full - at which point we block the child process
-      if self.file.hasProcessTerminated {
-        try? self.file.idempotentClose()
-      }
     }
 
     /// Read bytes from the pipe.
@@ -238,6 +223,11 @@ extension Subprocess {
 
     private func readAll(onDataRead: (UnsafeMutableRawBufferPointer, Int) -> Void) async throws {
       let fd = try self.file.getFileDescriptorUnlessCancelled()
+
+      // We are starting a long running read. Process may terminate during it.
+      // We need to finish the read before we close the file.
+      self.incrementPendingReadCount()
+      defer { self.decrementPendingReadCount() }
 
       let count = 1024
       let buffer = UnsafeMutableRawBufferPointer.allocate(byteCount: count, alignment: 1)
@@ -299,15 +289,36 @@ extension Subprocess {
       }
     }
 
-    /// Automatic closing is delayed until `deinit` to allow users to read the
-    /// buffer after the process is terminated. They can call `close` if they
-    /// really want to SIGPIPE the child (not recommended).
-    internal func markProcessAsTerminated() {
-      self.file.markProcessAsTerminated()
-    }
-
     /// Idempotent close.
     public func close() throws {
+      try self.file.idempotentClose()
+    }
+
+    private func incrementPendingReadCount() {
+      self.pendingReadCount += 1
+    }
+
+    private func decrementPendingReadCount() {
+      self.pendingReadCount -= 1
+      assert(self.pendingReadCount >= 0)
+
+      if self.pendingReadCount == 0 {
+        let close = self.closeContinuation
+        self.closeContinuation = nil
+        close?.resume()
+      }
+    }
+
+    /// Uppercase - called from termination task.
+    ///
+    /// Wait until all long running reads finish and close the file.
+    internal func CLOSE_AFTER_FINISHING_PENDING_READS() async throws {
+      if self.pendingReadCount > 0 {
+        await withUnsafeContinuation { continuation in
+          self.closeContinuation = continuation
+        }
+      }
+
       try self.file.idempotentClose()
     }
   }

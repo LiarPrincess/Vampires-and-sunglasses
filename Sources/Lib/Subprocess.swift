@@ -254,35 +254,70 @@ public actor Subprocess {
     }
   }
 
+  public struct ReadOutputAndWaitResult: Sendable {
+    public let exitStatus: CInt
+    public let stdout: Data
+    public let stderr: Data
+  }
+
   /// Wait for the child process to terminate.
   ///
   /// 1. Read the data from `stdout` and `stderr` until end-of-file is reached.
   /// 2. Wait for the process to terminate.
   ///
-  /// This should be the only `wait` we expose, but I like the idea of having
-  /// both of them.
+  /// Reads are important because some native platforms only provide limited
+  /// buffer size for standard input and output streams. Failure to promptly
+  /// read the output stream may cause the subprocess to block, or even deadlock.
   ///
-  /// - Returns: The exit status.
+  /// Importanties:
+  /// - output is collected only if `pipeToParent` was used when creating
+  ///   the `Subprocess`.
+  /// - this method should be called from the same task that does the IO.
+  ///   Configurations where one task does `process.stdout.read` and the other
+  ///   does `process.readOutputAndWaitForTermination` are not deterministic,
+  ///   since both of those tasks are performing `read` at the same time.
+  /// - you can disable output collection by setting `collectStdout` or
+  ///   `collectStderr` to `false`.
+  /// - the data read is buffered in memory, so do not use this method if the
+  ///   data size is large or unlimited.
   @discardableResult
-  public func readOutputAndWaitForTermination() async throws -> CInt {
-    // Read stdout/stderr in parallel as we do not know to which one the process
-    // writes. We can do this because those are 2 different pipes.
+  public func readOutputAndWaitForTermination(
+    collectStdout: Bool = true,
+    collectStderr: Bool = true
+  ) async throws -> ReadOutputAndWaitResult {
     @Sendable
-    func readAllDiscardingResult(_ o: Output?) async throws {
+    func read(_ out: Output?, collect: Bool) async throws -> Data {
+      guard let out = out else {
+        return Data()
+      }
+
       do {
-        try await o?.readAllDiscardingResult()
+        if collect {
+          return try await out.readAll()
+        }
+
+        try await out.readAllDiscardingResult()
+        return Data()
       } catch Errno.badFileDescriptor {
         // File is closed.
+        return Data()
       }
     }
 
-    try await withThrowingTaskGroup(of: Void.self) { group in
-      group.addTask { try await readAllDiscardingResult(self._stdout) }
-      group.addTask { try await readAllDiscardingResult(self._stderr) }
-      try await group.waitForAll()
-    }
+    // Read stdout/stderr in parallel as we do not know to which one the process
+    // writes. We can do this because those are 2 different pipes.
+    async let stdout = read(self._stdout, collect: collectStdout)
+    async let stderr = read(self._stderr, collect: collectStderr)
 
-    return try await self.waitForTermination()
+    // Remember to await for streams before the 'wait'!
+    let streams = try await (stdout, stderr)
+    let exitStatus = try await self.waitForTermination()
+
+    return ReadOutputAndWaitResult(
+      exitStatus: exitStatus,
+      stdout: streams.0,
+      stderr: streams.1
+    )
   }
 
   private enum TerminateAfterResult<R> {
@@ -340,10 +375,11 @@ public actor Subprocess {
     // Stdin can be closed without any problems.
     try? await self._stdin?.close()
 
-    // 'Stdout' and 'stderr' can't be closed now as writes are stored in the buffer
-    // and we want to allow the user to read this buffer even after the termination.
-    await self._stdout?.markProcessAsTerminated()
-    await self._stderr?.markProcessAsTerminated()
+    // Race condition: there may be a pending read on stdout/stderr (for example
+    // from 'self.readOutputAndWaitForTermination'). We need to allow it to
+    // finish reading data from the pipe buffer.
+    try? await self._stdout?.CLOSE_AFTER_FINISHING_PENDING_READS()
+    try? await self._stderr?.CLOSE_AFTER_FINISHING_PENDING_READS()
 
     print("[\(self.pid)] Resuming 'wait' suspensions.")
 
