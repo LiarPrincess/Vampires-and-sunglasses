@@ -92,30 +92,19 @@ public actor Subprocess {
 
   /// Suspended `Tasks` waiting for termination.
   private var suspensions = [Suspension]()
-  /// Files to close after the termination.
-  /// This excludes `stdin`, `stdout` and `stderr`, because those have special rules.
-  private var filesToCloseWithoutStdinStdoutStderr = [FileDescriptor]()
+  /// Last known state of the process.
   private var state = State.running
 
   internal init(
     pid: pid_t,
     stdinNonBlockingWriter stdinWriter: FileDescriptor?,
     stdoutNonBlockingReader stdoutReader: FileDescriptor?,
-    stderrNonBlockingReader stderrReader: FileDescriptor?,
-    filesToClose: [FileDescriptor]
+    stderrNonBlockingReader stderrReader: FileDescriptor?
   ) {
     self.pid = pid
     self._stdin = stdinWriter.map(Input.init(nonBlockingFile:))
     self._stdout = stdoutReader.map(Output.init(nonBlockingFile:))
     self._stderr = stderrReader.map(Output.init(nonBlockingFile:))
-
-    for fd in filesToClose {
-      let isExcluded = fd == stdinWriter || fd == stdoutReader || fd == stderrReader
-
-      if !isExcluded {
-        self.filesToCloseWithoutStdinStdoutStderr.append(fd)
-      }
-    }
   }
 
   deinit {
@@ -355,11 +344,6 @@ public actor Subprocess {
     // and we want to allow the user to read this buffer even after the termination.
     await self._stdout?.markProcessAsTerminated()
     await self._stderr?.markProcessAsTerminated()
-
-    for file in self.filesToCloseWithoutStdinStdoutStderr {
-      // Ignore errors.
-      try? file.close()
-    }
 
     print("[\(self.pid)] Resuming 'wait' suspensions.")
 

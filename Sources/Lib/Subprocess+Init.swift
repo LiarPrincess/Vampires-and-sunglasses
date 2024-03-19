@@ -57,14 +57,14 @@ extension Subprocess {
     stdout stdoutArg: InitStdout = .discard,
     stderr stderrArg: InitStderr = .discard
   ) throws {
-    /// Combines: files provided by the user and the ones opened by us (pipes etc…).
-    var filesToClose = [FileDescriptor]()
-    /// After we spawn we can close the child end of the pipe.
-    var childPipesToClose = [FileDescriptor]()
+    // Files send to the child.
+    var closeAfterSpawn = [FileDescriptor]()
+    // Flies that stay in the parent (parent pipe ends).
+    var closeAfterTermination = [FileDescriptor]()
 
     func cleanupAndThrow(_ error: InitError) throws -> Never {
-      filesToClose.closeAllIgnoringErrors()
-      childPipesToClose.closeAllIgnoringErrors()
+      closeAfterSpawn.closeAllIgnoringErrors()
+      closeAfterTermination.closeAllIgnoringErrors()
       throw error
     }
 
@@ -78,7 +78,7 @@ extension Subprocess {
 
       let result = try FileDescriptor.open("/dev/null", .readWrite, options: .closeOnExec)
       discardFile = result
-      filesToClose.append(result)
+      closeAfterSpawn.append(result)
       return result
     }
 
@@ -86,28 +86,31 @@ extension Subprocess {
     // === Always close user files ===
     // ===============================
 
+    func handleClose(_ fd: FileDescriptor, _ close: Bool) {
+      if close { closeAfterSpawn.append(fd) }
+    }
+
     switch stdinArg {
     case .none: break
     case .pipeFromParent: break
-    case let .readFromFile(fd, close): if close { filesToClose.append(fd) }
+    case let .readFromFile(fd, close): handleClose(fd, close)
     }
 
     switch stdoutArg {
     case .discard: break
     case .pipeToParent: break
-    case let .writeToFile(fd, close): if close { filesToClose.append(fd) }
+    case let .writeToFile(fd, close): handleClose(fd, close)
     }
 
     switch stderrArg {
     case .discard: break
     case .pipeToParent: break
-    case let .writeToFile(fd, close): if close { filesToClose.append(fd) }
+    case let .writeToFile(fd, close): handleClose(fd, close)
     }
 
     // =============
     // === Stdin ===
     // =============
-// TODO: O_CLOEXEC?
 
     let stdin: FileDescriptor
     let stdinNonBlockingWriter: FileDescriptor?
@@ -122,8 +125,8 @@ extension Subprocess {
         let p = try FileDescriptor.pipe()
         stdin = p.readEnd
         stdinNonBlockingWriter = p.writeEnd
-        childPipesToClose.append(p.readEnd)
-        filesToClose.append(p.writeEnd)
+        closeAfterSpawn.append(p.readEnd)
+        closeAfterTermination.append(p.writeEnd)
         // Writing to full pipe should not block.
         try Self.setNonBlocking(p.writeEnd)
         try Self.setPipeBufferSize(writeEnd: p.writeEnd, sizeInBytes: sizeInBytes)
@@ -150,8 +153,8 @@ extension Subprocess {
 
       case let .pipeToParent(sizeInBytes):
         let (readEnd, writeEnd) = try FileDescriptor.pipe()
-        filesToClose.append(readEnd)
-        childPipesToClose.append(writeEnd)
+        closeAfterTermination.append(readEnd)
+        closeAfterSpawn.append(writeEnd)
         // Reading from an empty pipe should not block.
         try Self.setNonBlocking(readEnd)
         try Self.setPipeBufferSize(writeEnd: writeEnd, sizeInBytes: sizeInBytes)
@@ -201,20 +204,30 @@ extension Subprocess {
     }
 
     // We can close the pipes that were moved to the child as 'dup2' was used.
-    childPipesToClose.closeAllIgnoringErrors()
+    closeAfterSpawn.closeAllIgnoringErrors()
     // Skip those pipes if we ever call 'cleanupAndThrow'.
     // (Which currently does not happen, but maybe in the future.)
-    childPipesToClose = []
+    closeAfterSpawn = []
+
+#if DEBUG
+    // Sanity check. Only parent pipes should be closed after the termination.
+    // Child ends should be already closed via 'closeAfterSpawn'.
+    for fd in closeAfterTermination {
+      let isParent = fd == stdinNonBlockingWriter
+        || fd == stdoutNonBlockingReader
+        || fd == stderrNonBlockingReader
+
+      assert(isParent)
+    }
+#endif
 
     self.init(
       pid: pid,
       stdinNonBlockingWriter: stdinNonBlockingWriter,
       stdoutNonBlockingReader: stdoutNonBlockingReader,
-      stderrNonBlockingReader: stderrNonBlockingReader,
-      filesToClose: filesToClose
+      stderrNonBlockingReader: stderrNonBlockingReader
     )
 
-// TODO: await
     print("[\(pid)] \(executablePath)")
     SYSTEM_WAIT_FOR_TERMINATION_IN_BACKGROUND(process: self)
   }
