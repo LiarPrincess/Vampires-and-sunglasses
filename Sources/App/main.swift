@@ -2,175 +2,25 @@ import Lib
 import Foundation
 import SystemPackage
 
-#if os(macOS)
-let bin = "/bin"
-#elseif os(Linux)
-let bin = "/usr/bin"
-#endif
-
-// On macOS some executables (wc, grep) are in '/usr/bin'.
-let usr_bin = "/usr/bin"
-
 let second: UInt64 = 1_000_000_000
 
-print("[Parent] Start <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
+private func getExecutablePath(_ executableName: String) -> String {
+  let dirs = [
+    "/usr/bin/",
+    "/bin/",
+    "/usr/sbin/",
+    "/sbin/",
+    "/usr/local/bin/"
+  ]
 
-/// Helper that spawns `sleep`.
-func sleep(seconds: Int) throws -> Subprocess {
-  return try Subprocess(
-    executablePath: "\(bin)/sleep",
-    arguments: [String(seconds)]
-  )
-}
-
-/// Other task kills the process that we wait.
-func kill() async throws {
-  print("\n=== kill ===")
-  let process = try sleep(seconds: 24 * 60 * 60) // 24h, lets hope it works!
-
-  Task.detached {
-    try await Task.sleep(nanoseconds: 1 * second)
-    print("Different task sends kill")
-    try await process.kill()
+  for dir in dirs {
+    let path = dir + executableName
+    if FileManager.default.isExecutableFile(atPath: path) {
+      return path
+    }
   }
 
-  let status = try await process.waitForTermination()
-  print("Exit status:", status)
-  assert(status == -9)
-}
-
-/// Just wait for the process to end.
-func wait_fullSleep() async throws {
-  print("\n=== wait ===")
-  let process = try sleep(seconds: 1)
-  let status = try await process.waitForTermination()
-  print("Exit status:", status)
-  assert(status == 0)
-}
-
-/// Cancel `Task` that waits.
-func wait_lateCancellation() async throws {
-  print("\n=== wait - late cancellation ===")
-  let process = try sleep(seconds: 2)
-
-  let cancelledTask = Task.detached {
-    let status = try? await process.waitForTermination()
-    print("Exit status:", status.map(String.init) ?? "nil", "<-- cancelled task")
-    assert(status == nil)
-  }
-
-  // Wait until it hits 'process.waitForTermination()'
-  try await Task.sleep(nanoseconds: 1 * second)
-  print("Cancelling task")
-  cancelledTask.cancel()
-
-  // Just sync.
-  let status = try await process.waitForTermination()
-  print("Exit status:", status, "<-- main task")
-  assert(status == 0)
-}
-
-/// Many tasks wait for the process
-func wait_multipleTasks() async throws {
-  print("\n=== wait - multiple tasks ===")
-  let process = try sleep(seconds: 2)
-  let semaphore = Semaphore()
-
-  Task.detached {
-    let status = try await process.waitForTermination()
-    print("Exit status:", status, "<-- task 1")
-    assert(status == 0)
-    await semaphore.signal()
-  }
-
-  Task.detached {
-    let status = try await process.waitForTermination()
-    print("Exit status:", status, "<-- task 2")
-    assert(status == 0)
-    await semaphore.signal()
-  }
-
-  let status = try await process.waitForTermination()
-  print("Exit status:", status, "<-- main task")
-  assert(status == 0)
-
-  try await semaphore.wait(until: 2)
-}
-
-/// Wait after the termination.
-func wait_afterTermination() async throws {
-  print("\n=== wait - after termination ===")
-  let process = try sleep(seconds: 2)
-
-  print("Waiting BEFORE termination")
-  let status0 = try await process.waitForTermination()
-  print("Exit status:", status0)
-  assert(status0 == 0)
-
-  print("Waiting AFTER termination")
-  let status1 = try await process.waitForTermination()
-  print("Exit status:", status1)
-  assert(status1 == 0)
-}
-
-/// Scoped termination.
-func terminateAfter() async throws {
-  print("\n=== terminateAfter ===")
-  let process = try sleep(seconds: 24 * 60 * 60) // 24h, lets hope it works!
-
-  try await process.terminateAfter { @Sendable in
-    print("Terminate after - doing important work…")
-    try await Task.sleep(nanoseconds: 3 * second)
-    print("Terminate after - finished")
-  }
-
-  let status = try await process.waitForTermination()
-  print("Exit status:", status)
-  assert(status == -15)
-}
-
-func executablePath_doesNotExist() async throws {
-  print("\n=== executable path - does not exist ===")
-
-  do {
-    let executablePath = "\(bin)/404_not_found"
-    _ = try Subprocess(executablePath: executablePath)
-    print("We somehow executed:", executablePath)
-    assert(false, executablePath)
-  } catch {
-    print("Error (as expected):", error)
-  }
-}
-
-private func stdin() async throws {
-  print("\n=== stdin ===")
-
-  let process = try Subprocess(
-    executablePath: "\(usr_bin)/wc",
-    arguments: ["-l"],
-    stdin: .pipeFromParent,
-    stdout: .pipeToParent
-  )
-
-  let s = "1\n2\n3"
-  print("Writing:", s.replacingOccurrences(of: "\n", with: "\\n"))
-  try await process.stdin.writeAll(s, encoding: .ascii)
-  try await process.stdin.close()
-
-  let result = try await process.readOutputAndWaitForTermination()
-
-  if var stdout = String(data: result.stdout, encoding: .utf8) {
-    stdout = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-    print("For 'wc' line has to end with '\\n', we only have 2 of them")
-    print("Output:", stdout)
-    assert(stdout == "2")
-  } else {
-    print("Output: <decoding_error>")
-  }
-
-  let status = result.exitStatus
-  print("Exit status:", status)
-  assert(status == 0)
+  preconditionFailure("Unable to find executable: \(executableName).")
 }
 
 /// We need to find the file in the repository root. Because Xcode… ehh…
@@ -189,14 +39,162 @@ private func getFileFromRepositoryRoot(name: String) -> String {
   fatalError("Unable to find '\(name)' from the repository root.")
 }
 
+print("[Parent] Start <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
+
+/// Helper that spawns `sleep`.
+func sleep(seconds: Int) throws -> Subprocess {
+  return try Subprocess(
+    executablePath: getExecutablePath("sleep"),
+    arguments: [String(seconds)]
+  )
+}
+
+/// Other task kills the process that we wait.
+func kill() async throws {
+  print("\n=== Kill ===")
+  let process = try sleep(seconds: 24 * 60 * 60) // 24h, lets hope it works!
+
+  Task.detached {
+    try await Task.sleep(nanoseconds: 1 * second)
+    print("⚪ Different task sends kill")
+    try await process.kill()
+  }
+
+  let status = try await process.waitForTermination()
+  print(status == -9 ? "🟢" : "🔴", "Exit status:", status)
+}
+
+/// Just wait for the process to end.
+func wait_fullSleep() async throws {
+  print("\n=== Wait ===")
+  let process = try sleep(seconds: 1)
+  let status = try await process.waitForTermination()
+  print(status == 0 ? "🟢" : "🔴", "Exit status:", status)
+}
+
+/// Cancel `Task` that waits.
+func wait_lateCancellation() async throws {
+  print("\n=== Wait - late cancellation ===")
+  let process = try sleep(seconds: 2)
+
+  let cancelledTask = Task.detached {
+    let status = try? await process.waitForTermination()
+    print(status == nil ? "🟢" : "🔴", "Exit status:", status.map(String.init) ?? "nil", "<-- cancelled task")
+  }
+
+  // Wait until it hits 'process.waitForTermination()'
+  try await Task.sleep(nanoseconds: 1 * second)
+  print("⚪ Cancelling task")
+  cancelledTask.cancel()
+
+  // Just sync.
+  let status = try await process.waitForTermination()
+  print(status == 0 ? "🟢" : "🔴", "Exit status:", status, "<-- main task")
+}
+
+/// Many tasks wait for the process
+func wait_multipleTasks() async throws {
+  print("\n=== Wait - multiple tasks ===")
+  let process = try sleep(seconds: 2)
+  let semaphore = Semaphore()
+
+  Task.detached {
+    let status = try await process.waitForTermination()
+    print(status == 0 ? "🟢" : "🔴", "Exit status:", status, "<-- task 1")
+    await semaphore.signal()
+  }
+
+  Task.detached {
+    let status = try await process.waitForTermination()
+    print(status == 0 ? "🟢" : "🔴", "Exit status:", status, "<-- task 2")
+    await semaphore.signal()
+  }
+
+  let status = try await process.waitForTermination()
+  print(status == 0 ? "🟢" : "🔴", "Exit status:", status, "<-- main task")
+
+  try await semaphore.wait(until: 2)
+}
+
+/// Wait after the termination.
+func wait_afterTermination() async throws {
+  print("\n=== Wait - after termination ===")
+  let process = try sleep(seconds: 2)
+
+  print("⚪ Waiting BEFORE termination")
+  let status0 = try await process.waitForTermination()
+  print(status0 == 0 ? "🟢" : "🔴", "Exit status:", status0)
+
+  print("⚪ Waiting AFTER termination")
+  let status1 = try await process.waitForTermination()
+  print(status1 == 0 ? "🟢" : "🔴", "Exit status:", status1)
+}
+
+private func stdin() async throws {
+  print("\n=== Stdin ===")
+
+  let process = try Subprocess(
+    executablePath: getExecutablePath("wc"),
+    arguments: ["-l"],
+    stdin: .pipeFromParent,
+    stdout: .pipeToParent
+  )
+
+  let s = "1\n2\n3"
+  print("⚪ Writing:", s.replacingOccurrences(of: "\n", with: "\\n"))
+  try await process.stdin.writeAll(s, encoding: .ascii)
+  try await process.stdin.close()
+
+  let result = try await process.readOutputAndWaitForTermination()
+
+  if var stdout = String(data: result.stdout, encoding: .utf8) {
+    stdout = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    print("⚪ For 'wc' line has to end with '\\n', we only have 2 of them")
+    print(stdout == "2" ? "🟢":"🔴", "Output:", stdout)
+  } else {
+    print("🔴 Output: <decoding_error>")
+  }
+
+  let status = result.exitStatus
+  print(status == 0 ? "🟢" : "🔴", "Exit status:", status)
+}
+
+/// Scoped termination.
+func terminateAfter() async throws {
+  print("\n=== Terminate after ===")
+  let process = try sleep(seconds: 24 * 60 * 60) // 24h, lets hope it works!
+
+  try await process.terminateAfter { @Sendable in
+    print("⚪ Terminate after - doing important work…")
+    try await Task.sleep(nanoseconds: 3 * second)
+    print("⚪ Terminate after - finished")
+  }
+
+  let status = try await process.waitForTermination()
+  print(status == -15 ? "🟢" : "🔴", "Exit status:", status)
+}
+
+func executablePath_doesNotExist() async throws {
+  print("\n=== Executable path - does not exist ===")
+
+  do {
+    let executablePath = "/usr/bin/404_not_found"
+    _ = try Subprocess(executablePath: executablePath)
+    print("🔴 We somehow executed:", executablePath)
+  } catch {
+    print("🟢 Error:", error)
+  }
+}
+
 private func catPrideAndPrejudice(
   stdin: Subprocess.InitStdin = .none,
   stdout: Subprocess.InitStdout = .discard,
   stderr: Subprocess.InitStderr = .discard
 ) throws -> Subprocess {
+  let executablePath = getExecutablePath("cat")
   let path = getFileFromRepositoryRoot(name: "Pride and Prejudice.txt")
   return try Subprocess(
-    executablePath: "\(bin)/cat",
+    executablePath: executablePath,
     arguments: [path],
     stdin: stdin,
     stdout: stdout,
@@ -205,42 +203,40 @@ private func catPrideAndPrejudice(
 }
 
 private func prideAndPrejudice_readAll() async throws {
-  print("\n=== Pride and prejudice - Read all ===")
+  print("\n=== Pride and prejudice - read all ===")
   let process = try catPrideAndPrejudice(stdout: .pipeToParent)
 
-  print("Read all")
+  print("⚪ Reading stdout")
   if let s = try await process.stdout.readAll(encoding: .utf8) {
-    print("Got \(s.count) characters")
+    print(s.count == 748152 ? "🟢" : "🔴", "Got \(s.count) characters")
   } else {
-    print("Decoding failed?")
+    print("🔴 Decoding failed?")
   }
 
   let status = try await process.waitForTermination()
-  print("Exit status:", status)
-  assert(status == 0)
+  print(status == 0 ? "🟢" : "🔴", "Exit status:", status)
 }
 
-private func prideAndPrejudice_discardAndWait() async throws {
-  print("\n=== Pride and prejudice - Discard and wait ===")
+private func prideAndPrejudice_discardAll() async throws {
+  print("\n=== Pride and prejudice - discard all ===")
   let process = try catPrideAndPrejudice(stdout: .pipeToParent)
 
-  print("readOutputAndWaitForTermination(discard reads)")
+  print("⚪ Reading stdout discarding data")
   let result = try await process.readOutputAndWaitForTermination(
     collectStdout: false,
     collectStderr: false
   )
 
-  print("stdout.count:", result.stdout.count)
-  print("stderr.count:", result.stderr.count)
+  print(result.stdout.isEmpty ? "🟢" : "🔴", "stdout.count:", result.stdout.count)
+  print(result.stderr.isEmpty ? "🟢" : "🔴", "stderr.count:", result.stderr.count)
 
   let status = result.exitStatus
-  print("Exit status:", status)
-  assert(status == 0)
+  print(status == 0 ? "🟢" : "🔴", "Exit status:", status)
 }
 
 private func prideAndPrejudice_deadlockWhenPipeIsFull() async throws {
-  print("\n=== Pride and prejudice - Deadlock when pipe is full ===")
-  print("Uncomment the code below…")
+  print("\n=== Pride and prejudice - deadlock when pipe is full ===")
+  print("⚪ Uncomment the code below…")
 
 /*
   let process = try catPrideAndPrejudice(stdout: .pipe)
@@ -249,10 +245,10 @@ private func prideAndPrejudice_deadlockWhenPipeIsFull() async throws {
 }
 
 private func prideAndPrejudice_copy() async throws {
-  print("\n=== Pride and prejudice - Copy ===")
+  print("\n=== Pride and prejudice - copy ===")
 
   let fileName = "Pride and Prejudice - copy.txt"
-  print("Writing to: \(fileName)")
+  print("⚪ Writing to: \(fileName)")
 
   let file = try FileDescriptor.open(
     fileName,
@@ -266,8 +262,7 @@ private func prideAndPrejudice_copy() async throws {
   )
 
   let status = try await process.waitForTermination()
-  print("Exit status:", status)
-  assert(status == 0)
+  print(status == 0 ? "🟢" : "🔴", "Exit status:", status)
 }
 
 private func prideAndPrejudice_cat_grep_wc() async throws {
@@ -280,38 +275,37 @@ private func prideAndPrejudice_cat_grep_wc() async throws {
   // Start the child process. It DOES NOT block waiting for it finish.
   // Use 'waitForTermination' methods for synchronization.
   _ = try Subprocess(
-    executablePath: "\(bin)/cat",
+    executablePath: getExecutablePath("cat"),
     arguments: [path],
     stdout: .writeToFile(catToGrep.writeEnd) // close by default
   )
 
   _ = try Subprocess(
-    executablePath: "\(usr_bin)/grep",
+    executablePath: getExecutablePath("grep"),
     arguments: ["-o", "Elizabeth", path],
     stdin: .readFromFile(catToGrep.readEnd),
     stdout: .writeToFile(grepToWc.writeEnd)
   )
 
   let wc = try Subprocess(
-    executablePath: "\(usr_bin)/wc",
+    executablePath: getExecutablePath("wc"),
     arguments: ["-l"],
     stdin: .readFromFile(grepToWc.readEnd),
     stdout: .pipeToParent
   )
 
-  print("wc.readOutputAndWaitForTermination()")
+  print("⚪ wc -> read all and wait for termination")
   let result = try await wc.readOutputAndWaitForTermination()
+
   if var stdout = String(data: result.stdout, encoding: .utf8) {
     stdout = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-    print("Output:", stdout)
-    assert(stdout == "645")
+    print(stdout == "645" ? "🟢" : "🔴", "Output:", stdout)
   } else {
-    print("Output: <decoding_error>")
+    print("🔴 Output: <decoding_error>")
   }
 
   let status = result.exitStatus
-  print("Exit status:", status)
-  assert(status == 0)
+  print(status == 0 ? "🟢" : "🔴", "Exit status:", status)
 }
 
 try await kill()
@@ -321,13 +315,12 @@ try await wait_lateCancellation()
 try await wait_multipleTasks()
 try await wait_afterTermination()
 
+try await stdin()
 try await terminateAfter()
 try await executablePath_doesNotExist()
 
-try await stdin()
-
 try await prideAndPrejudice_readAll()
-try await prideAndPrejudice_discardAndWait()
+try await prideAndPrejudice_discardAll()
 try await prideAndPrejudice_deadlockWhenPipeIsFull()
 try await prideAndPrejudice_copy()
 try await prideAndPrejudice_cat_grep_wc()

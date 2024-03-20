@@ -136,20 +136,25 @@ internal func system_spawn(
   }
 
   if pid < 0 {
-    let operation: String
+    if pid == _CLIB_FORK_EXEC_CHILD_ERR_EXEC && forkError == Errno.noSuchFileOrDirectory.rawValue {
+      print("\(executablePath): Executable not found")
+    } else {
+      let operation: String
 
-    switch pid {
-    case _CLIB_FORK_EXEC_ERR_PIPE_OPEN: operation = "Open exec pipe"
-    case _CLIB_FORK_EXEC_ERR_FORK: operation = "Fork"
-    case _CLIB_FORK_EXEC_ERR_PIPE_READ: operation = "Read exec pipe"
-    case _CLIB_FORK_EXEC_CHILD_ERR_DUP2: operation = "Set stdin/stdout/stderr"
-    case _CLIB_FORK_EXEC_CHILD_ERR_PIPE_CLOEXEC: operation = "Set exec pipe CLOEXEC"
-    case _CLIB_FORK_EXEC_CHILD_ERR_EXEC: operation = "Exec"
-    // We added a new operation in C, but forgot to update Swift code?
-    default: operation = "<unknown operation>"
+      switch pid {
+      case _CLIB_FORK_EXEC_ERR_PIPE_OPEN: operation = "Open exec pipe"
+      case _CLIB_FORK_EXEC_ERR_FORK: operation = "Fork"
+      case _CLIB_FORK_EXEC_ERR_PIPE_READ: operation = "Read exec pipe"
+      case _CLIB_FORK_EXEC_CHILD_ERR_DUP2: operation = "Set stdin/stdout/stderr"
+      case _CLIB_FORK_EXEC_CHILD_ERR_PIPE_CLOEXEC: operation = "Set exec pipe CLOEXEC"
+      case _CLIB_FORK_EXEC_CHILD_ERR_EXEC: operation = "Exec"
+      // We added a new operation in C, but forgot to update Swift code?
+      default: operation = "<unknown operation>"
+      }
+
+      print("\(executablePath): \(operation): \(Errno(rawValue: forkError))")
     }
 
-    print("\(executablePath): \(operation): \(Errno(rawValue: forkError))")
     return cleanupAndThrow(errno: forkError)
   }
 
