@@ -8,6 +8,9 @@ let bin = "/bin"
 let bin = "/usr/bin"
 #endif
 
+// On macOS some executables (wc, grep) are in '/usr/bin'.
+let usr_bin = "/usr/bin"
+
 let second: UInt64 = 1_000_000_000
 
 print("[Parent] Start <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
@@ -16,13 +19,7 @@ print("[Parent] Start <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
 func sleep(seconds: Int) throws -> Subprocess {
   return try Subprocess(
     executablePath: "\(bin)/sleep",
-    arguments: [String(seconds)],
-    environment: Environment.inherit.updating([
-      "Ala": "Basia"
-    ]),
-    stdin: .none,
-    stdout: .discard,
-    stderr: .discard
+    arguments: [String(seconds)]
   )
 }
 
@@ -132,6 +129,50 @@ func terminateAfter() async throws {
   assert(status == -15)
 }
 
+func executablePath_doesNotExist() async throws {
+  print("\n=== executable path - does not exist ===")
+
+  do {
+    let executablePath = "\(bin)/404_not_found"
+    _ = try Subprocess(executablePath: executablePath)
+    print("We somehow executed:", executablePath)
+    assert(false, executablePath)
+  } catch {
+    print("Error (as expected):", error)
+  }
+}
+
+private func stdin() async throws {
+  print("\n=== stdin ===")
+
+  let process = try Subprocess(
+    executablePath: "\(usr_bin)/wc",
+    arguments: ["-l"],
+    stdin: .pipeFromParent,
+    stdout: .pipeToParent
+  )
+
+  let s = "1\n2\n3"
+  print("Writing:", s.replacingOccurrences(of: "\n", with: "\\n"))
+  try await process.stdin.writeAll(s, encoding: .ascii)
+  try await process.stdin.close()
+
+  let result = try await process.readOutputAndWaitForTermination()
+
+  if var stdout = String(data: result.stdout, encoding: .utf8) {
+    stdout = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    print("For 'wc' line has to end with '\\n', we only have 2 of them")
+    print("Output:", stdout)
+    assert(stdout == "2")
+  } else {
+    print("Output: <decoding_error>")
+  }
+
+  let status = result.exitStatus
+  print("Exit status:", status)
+  assert(status == 0)
+}
+
 /// We need to find the file in the repository root. Because Xcode… ehh…
 private func getFileFromRepositoryRoot(name: String) -> String {
   var dir = URL(fileURLWithPath: #file)
@@ -183,8 +224,16 @@ private func prideAndPrejudice_discardAndWait() async throws {
   print("\n=== Pride and prejudice - Discard and wait ===")
   let process = try catPrideAndPrejudice(stdout: .pipeToParent)
 
-  print("readOutputAndWaitForTermination()")
-  let status = try await process.readOutputAndWaitForTermination()
+  print("readOutputAndWaitForTermination(discard reads)")
+  let result = try await process.readOutputAndWaitForTermination(
+    collectStdout: false,
+    collectStderr: false
+  )
+
+  print("stdout.count:", result.stdout.count)
+  print("stderr.count:", result.stderr.count)
+
+  let status = result.exitStatus
   print("Exit status:", status)
   assert(status == 0)
 }
@@ -221,6 +270,50 @@ private func prideAndPrejudice_copy() async throws {
   assert(status == 0)
 }
 
+private func prideAndPrejudice_cat_grep_wc() async throws {
+  print("\n=== Pride and prejudice - cat | grep | wc ===")
+
+  let path = getFileFromRepositoryRoot(name: "Pride and Prejudice.txt")
+  let catToGrep = try FileDescriptor.pipe()
+  let grepToWc = try FileDescriptor.pipe()
+
+  // Start the child process. It DOES NOT block waiting for it finish.
+  // Use 'waitForTermination' methods for synchronization.
+  _ = try Subprocess(
+    executablePath: "\(bin)/cat",
+    arguments: [path],
+    stdout: .writeToFile(catToGrep.writeEnd) // close by default
+  )
+
+  _ = try Subprocess(
+    executablePath: "\(usr_bin)/grep",
+    arguments: ["-o", "Elizabeth", path],
+    stdin: .readFromFile(catToGrep.readEnd),
+    stdout: .writeToFile(grepToWc.writeEnd)
+  )
+
+  let wc = try Subprocess(
+    executablePath: "\(usr_bin)/wc",
+    arguments: ["-l"],
+    stdin: .readFromFile(grepToWc.readEnd),
+    stdout: .pipeToParent
+  )
+
+  print("wc.readOutputAndWaitForTermination()")
+  let result = try await wc.readOutputAndWaitForTermination()
+  if var stdout = String(data: result.stdout, encoding: .utf8) {
+    stdout = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    print("Output:", stdout)
+    assert(stdout == "645")
+  } else {
+    print("Output: <decoding_error>")
+  }
+
+  let status = result.exitStatus
+  print("Exit status:", status)
+  assert(status == 0)
+}
+
 try await kill()
 
 try await wait_fullSleep()
@@ -229,11 +322,15 @@ try await wait_multipleTasks()
 try await wait_afterTermination()
 
 try await terminateAfter()
+try await executablePath_doesNotExist()
+
+try await stdin()
 
 try await prideAndPrejudice_readAll()
 try await prideAndPrejudice_discardAndWait()
 try await prideAndPrejudice_deadlockWhenPipeIsFull()
 try await prideAndPrejudice_copy()
+try await prideAndPrejudice_cat_grep_wc()
 
 // Pipes.runAll()
 

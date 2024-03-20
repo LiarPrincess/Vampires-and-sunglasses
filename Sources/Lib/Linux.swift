@@ -40,7 +40,7 @@ internal func system_spawn(
   // === Argv ===
   // ============
 
-  var argv = [UnsafeMutablePointer<CChar>?]()
+  var argv = [UnsafePointer<CChar>?]()
   defer { for s in argv { s?.deallocate() } }
 
   if let arg0 = arguments.executablePathOverride {
@@ -86,25 +86,25 @@ internal func system_spawn(
     return result
   }
 
-  var env: [UnsafeMutablePointer<CChar>?] = []
+  var env: [UnsafePointer<CChar>?] = []
   defer { for s in env { s?.deallocate() } }
 
   switch environment.config {
   case .inherit(let updates):
-      var old = ProcessInfo.processInfo.environment
+    var old = ProcessInfo.processInfo.environment
 
-      for (key, value) in updates {
-        if let stringKey = key.stringValue {
-          old.removeValue(forKey: stringKey)
-        }
-
-        env.append(createEnvEntry(key: key, value: value))
+    for (key, value) in updates {
+      if let stringKey = key.stringValue {
+        old.removeValue(forKey: stringKey)
       }
 
-      for (key, value) in old {
-        let fullString = "\(key)=\(value)"
-        env.append(strdup(fullString))
-      }
+      env.append(createEnvEntry(key: key, value: value))
+    }
+
+    for (key, value) in old {
+      let fullString = "\(key)=\(value)"
+      env.append(strdup(fullString))
+    }
 
   case .custom(let customValues):
     for (key, value) in customValues {
@@ -115,91 +115,42 @@ internal func system_spawn(
   env.append(nil)
 
   // =============
-  // === Files ===
+  // === Spawn ===
   // =============
-
-#if os(macOS)
-  var fileActions: posix_spawn_file_actions_t?
-#elseif os(Linux)
-  var fileActions = posix_spawn_file_actions_t()
-#endif
-
-  posix_spawn_file_actions_init(&fileActions)
-  defer { posix_spawn_file_actions_destroy(&fileActions) }
-
-  var result = posix_spawn_file_actions_adddup2(&fileActions, stdin.rawValue, 0)
-  if result != 0 {
-    return cleanupAndThrow(errno: result)
-  }
-
-  result = posix_spawn_file_actions_adddup2(&fileActions, stdout.rawValue, 1)
-  if result != 0 {
-    return cleanupAndThrow(errno: result)
-  }
-
-  result = posix_spawn_file_actions_adddup2(&fileActions, stderr.rawValue, 2)
-  if result != 0 {
-    return cleanupAndThrow(errno: result)
-  }
-
-// TODO: For other files: fcntl(fd, F_SETFD, FD_CLOEXEC);
-// https://stackoverflow.com/questions/21950549/close-all-file-handles-when-calling-posix-spawn
-
-  // ==================
-  // === Attributes ===
-  // ==================
-
-#if os(macOS)
-  var spawnAttributes: posix_spawnattr_t?
-#elseif os(Linux)
-  var spawnAttributes = posix_spawnattr_t()
-#endif
-
-  posix_spawnattr_init(&spawnAttributes)
-  defer { posix_spawnattr_destroy(&spawnAttributes) }
-
-  // Set blocked signals to none.
-  var signalBlocked = sigset_t()
-  sigemptyset(&signalBlocked)
-  result = posix_spawnattr_setsigmask(&spawnAttributes, &signalBlocked)
-
-  if result != 0 {
-    return cleanupAndThrow(errno: result)
-  }
-
-  // Set signal handling to default.
-  var signalDefault = sigset_t()
-  sigfillset(&signalDefault)
-  result = posix_spawnattr_setsigdefault(&spawnAttributes, &signalDefault)
-
-  if result != 0 {
-    return cleanupAndThrow(errno: result)
-  }
-
-  // | POSIX_SPAWN_CLOEXEC_DEFAULT
-  let flags = POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF
-  result = posix_spawnattr_setflags(&spawnAttributes, Int16(flags))
-
-  if result != 0 {
-    return cleanupAndThrow(errno: result)
-  }
 
 // TODO: QualityOfService
 // TODO: CWD
 
-  // =============
-  // === Spawn ===
-  // =============
+  var forkError: CInt = 0
 
-  var pid: pid_t = 0
-
-  // Sometimes we need to fork-exec, but for our simple needs we can:
-  result = executablePath.withCString { exePath in
-    posix_spawn(&pid, exePath, &fileActions, &spawnAttributes, argv, env)
+  let pid = executablePath.withCString { exePath in
+    _clib_fork_exec(
+      exePath,
+      argv,
+      env,
+      stdin.rawValue,
+      stdout.rawValue,
+      stderr.rawValue,
+      &forkError
+    )
   }
 
-  if result != 0 {
-    return cleanupAndThrow(errno: result)
+  if pid < 0 {
+    let operation: String
+
+    switch pid {
+    case _CLIB_FORK_EXEC_ERR_PIPE_OPEN: operation = "Open exec pipe"
+    case _CLIB_FORK_EXEC_ERR_FORK: operation = "Fork"
+    case _CLIB_FORK_EXEC_ERR_PIPE_READ: operation = "Read exec pipe"
+    case _CLIB_FORK_EXEC_CHILD_ERR_DUP2: operation = "Set stdin/stdout/stderr"
+    case _CLIB_FORK_EXEC_CHILD_ERR_PIPE_CLOEXEC: operation = "Set exec pipe CLOEXEC"
+    case _CLIB_FORK_EXEC_CHILD_ERR_EXEC: operation = "Exec"
+    // We added a new operation in C, but forgot to update Swift code?
+    default: operation = "<unknown operation>"
+    }
+
+    print("\(executablePath): \(operation): \(Errno(rawValue: forkError))")
+    return cleanupAndThrow(errno: forkError)
   }
 
   return .success(pid)
