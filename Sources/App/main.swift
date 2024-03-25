@@ -308,21 +308,21 @@ private func prideAndPrejudice_cat_grep_wc() async throws {
   print(status == 0 ? "🟢" : "🔴", "Exit status:", status)
 }
 
-// try await kill()
+try await kill()
 
-// try await wait_fullSleep()
-// try await wait_lateCancellation()
-// try await wait_multipleTasks()
-// try await wait_afterTermination()
+try await wait_fullSleep()
+try await wait_lateCancellation()
+try await wait_multipleTasks()
+try await wait_afterTermination()
 
-// try await stdin()
-// try await terminateAfter()
-// try await executablePath_doesNotExist()
+try await stdin()
+try await terminateAfter()
+try await executablePath_doesNotExist()
 
-// try await prideAndPrejudice_readAll()
-// try await prideAndPrejudice_discardAll()
-// try await prideAndPrejudice_deadlockWhenPipeIsFull()
-// try await prideAndPrejudice_copy()
+try await prideAndPrejudice_readAll()
+try await prideAndPrejudice_discardAll()
+try await prideAndPrejudice_deadlockWhenPipeIsFull()
+try await prideAndPrejudice_copy()
 try await prideAndPrejudice_cat_grep_wc()
 
 // Pipes.runAll()
