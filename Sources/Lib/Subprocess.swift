@@ -117,12 +117,7 @@ public actor Subprocess {
   }
 
   /// Terminate the process with `SIGTERM`.
-  ///
-  /// ## Race condition
-  ///
-  /// This method respects cancellation, so sending the signal, and then canceling
-  /// the `Task` before the completion will throw `CancellationError`.
-  /// In such case is undefined whether the signal was delivered or not.
+  /// This method ignores `Task` cancellation.
   ///
   /// - Returns: `true` if the signal was delivered. `false` if the process
   /// was already terminated.
@@ -130,12 +125,7 @@ public actor Subprocess {
   public func terminate() throws -> Bool { try self.sendSignal(.terminate) }
 
   /// Kill the process with `SIGKILL`.
-  ///
-  /// ## Race condition
-  ///
-  /// This method respects cancellation, so sending the signal, and then canceling
-  /// the `Task` before the completion will throw `CancellationError`.
-  /// In such case is undefined whether the signal was delivered or not.
+  /// This method ignores `Task` cancellation.
   ///
   /// - Returns: `true` if the signal was delivered. `false` if the process
   /// was already terminated.
@@ -143,12 +133,7 @@ public actor Subprocess {
   public func kill() throws -> Bool { try self.sendSignal(.kill) }
 
   /// Sends the `signal` to the child process.
-  ///
-  /// ## Race condition
-  ///
-  /// This method respects cancellation, so sending the signal, and then canceling
-  /// the `Task` before the completion will throw `CancellationError`.
-  /// In such case is undefined whether the signal was delivered or not.
+  /// This method ignores `Task` cancellation.
   ///
   /// - Parameter signal: Signal to send.
   ///
@@ -156,8 +141,6 @@ public actor Subprocess {
   /// was already terminated.
   @discardableResult
   public func sendSignal(_ signal: Signal) throws -> Bool {
-    try Task.checkCancellation()
-
     switch self.state {
     case .running: break
     case .terminated: return false
@@ -166,8 +149,6 @@ public actor Subprocess {
     guard let errno = system_kill(pid: self.pid, signal: signal.rawValue) else {
       return true
     }
-
-    try Task.checkCancellation()
 
     switch errno {
     case .noSuchProcess:
@@ -184,12 +165,14 @@ public actor Subprocess {
   ///
   /// This method can deadlock when using `stdout=PIPE` or `stderr=PIPE` and the
   /// child process generates so much output that it blocks waiting for the OS
-  /// pipe buffer to accept more data. Use the `closePipesAndWait()` method when
-  /// using pipes to avoid this condition.
+  /// pipe buffer to accept more data. Use the `readOutputAndWaitForTermination()`
+  /// method when using pipes to avoid this condition.
   ///
   /// - Returns: The exit status.
   @discardableResult
   public func waitForTermination() async throws -> CInt {
+// TODO: wait task cancellation
+
     try Task.checkCancellation()
 
     switch self.state {
@@ -341,6 +324,8 @@ public actor Subprocess {
     signal: Signal = .terminate,
     body: () async throws -> R
   ) async throws -> R {
+// TODO: terminateAfter task cancellation
+
     let result: TerminateAfterResult<R>
 
     do {
