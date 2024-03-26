@@ -31,9 +31,10 @@ internal func system_spawn(
   stdin: FileDescriptor,
   stdout: FileDescriptor,
   stderr: FileDescriptor
-) -> Result<pid_t, Errno> {
-  func cleanupAndThrow(errno: CInt) -> Result<pid_t, Errno> {
-    return .failure(Errno(rawValue: errno))
+) -> Result<pid_t, Subprocess.InitError> {
+  func cleanupAndThrow(_ e: Subprocess.InitError) -> Result<pid_t, Subprocess.InitError> {
+    // No cleanup
+    return .failure(e)
   }
 
   // ============
@@ -121,7 +122,7 @@ internal func system_spawn(
 // TODO: QualityOfService
 // TODO: CWD
 
-  var forkError: CInt = 0
+  var forkErrno: CInt = 0
 
   let pid = executablePath.withCString { exePath in
     _clib_fork_exec(
@@ -131,31 +132,35 @@ internal func system_spawn(
       stdin.rawValue,
       stdout.rawValue,
       stderr.rawValue,
-      &forkError
+      &forkErrno
     )
   }
 
   if pid < 0 {
-    if pid == _CLIB_FORK_EXEC_CHILD_ERR_EXEC && forkError == Errno.noSuchFileOrDirectory.rawValue {
-      print("\(executablePath): Executable not found")
-    } else {
-      let operation: String
+    let error: Subprocess.InitError
 
-      switch pid {
-      case _CLIB_FORK_EXEC_ERR_PIPE_OPEN: operation = "Open exec pipe"
-      case _CLIB_FORK_EXEC_ERR_FORK: operation = "Fork"
-      case _CLIB_FORK_EXEC_ERR_PIPE_READ: operation = "Read exec pipe"
-      case _CLIB_FORK_EXEC_CHILD_ERR_DUP2: operation = "Set stdin/stdout/stderr"
-      case _CLIB_FORK_EXEC_CHILD_ERR_PIPE_CLOEXEC: operation = "Set exec pipe CLOEXEC"
-      case _CLIB_FORK_EXEC_CHILD_ERR_EXEC: operation = "Exec"
+    switch pid {
+    case _CLIB_FORK_EXEC_ERR_FORK:
+      error = .fork("Unable to fork subprocess", forkErrno)
+    case _CLIB_FORK_EXEC_CHILD_ERR_DUP2:
+      error = .fork("Unable to set subprocess stdin/stdout/stderr", forkErrno)
+
+    case _CLIB_FORK_EXEC_ERR_PIPE_OPEN:
+      error = .fork("Unable to open exec pipe", forkErrno)
+    case _CLIB_FORK_EXEC_ERR_PIPE_READ:
+      error = .fork("Unable to read exec pipe", forkErrno)
+    case _CLIB_FORK_EXEC_CHILD_ERR_PIPE_CLOEXEC:
+      error = .fork("Unable to set exec pipe FD_CLOEXEC", forkErrno)
+
+    case _CLIB_FORK_EXEC_CHILD_ERR_EXEC:
+      error = .exec(forkErrno)
+
+    default:
       // We added a new operation in C, but forgot to update Swift code?
-      default: operation = "<unknown operation>"
-      }
-
-      print("\(executablePath): \(operation): \(Errno(rawValue: forkError))")
+      fatalError("system_spawn: Unknown fork/exec error: \(forkErrno)")
     }
 
-    return cleanupAndThrow(errno: forkError)
+    return cleanupAndThrow(error)
   }
 
   return .success(pid)

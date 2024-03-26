@@ -37,10 +37,68 @@ extension Subprocess {
   // TODO: InitStderr.stdout that merges to stdout
   public typealias InitStderr = InitStdout
 
-  /// Errors that occurred during `init`.
-  public enum InitError: Swift.Error {
-    case IOError(Swift.Error)
-    case spawnError(SystemPackage.Errno)
+  /// Error that occurred during `init`.
+  public struct InitError: Swift.Error, Sendable, CustomStringConvertible {
+
+    public enum Code: Equatable, Hashable, Sendable {
+      /// Error when opening `stdin`.
+      case stdin
+      /// Error when opening `stdout`.
+      case stdout
+      /// Error when opening `stderr`.
+      case stderr
+      /// Error when creating the child process.
+      case fork
+      /// Error when running the executable.
+      case exec
+    }
+
+    public var code: Code
+    public var message: String
+    public var source: Swift.Error?
+
+    public init(code: Code, message: String, source: Swift.Error?) {
+      self.code = code
+      self.message = message
+      self.source = source
+    }
+
+    public var description: String {
+      let name: String
+
+      switch self.code {
+      case .stdin: name = "stdin"
+      case .stdout: name = "stdout"
+      case .stderr: name = "stderr"
+      case .fork: name = "fork"
+      case .exec: name = "exec"
+      }
+
+      let suffix = self.source.map { " (\($0))" } ?? ""
+      return "\(name): \(message)\(suffix)"
+    }
+
+    internal static func io_openDevNull(_ code: Code, _ error: Error) -> Self {
+      return Self(code: code, message: "Unable to open /dev/null", source: error)
+    }
+
+    internal static func io_setO_NONBLOCK(_ code: Code, _ error: Error) -> Self {
+      return Self(code: code, message: "Unable to set O_NONBLOCK", source: error)
+    }
+
+    internal static func io_setPipeBufferSize(_ code: Code, _ error: Error) -> Self {
+      return Self(code: code, message: "Unable to set pipe buffer size", source: error)
+    }
+
+    internal static func fork(_ message: String, _ error: CInt) -> Self {
+      let e = Errno(rawValue: error)
+      return Self(code: .fork, message: "\(message): \(e)", source: e)
+    }
+
+    internal static func exec(_ error: CInt) -> Self {
+      let e = Errno(rawValue: error)
+      return Self(code: .exec, message: "Unable to run executable", source: e)
+    }
   }
 
   /// Absolute/relative executable path.
@@ -115,28 +173,38 @@ extension Subprocess {
     let stdin: FileDescriptor
     let stdinNonBlockingWriter: FileDescriptor?
 
-    do {
-      switch stdinArg {
-      case .none:
+    switch stdinArg {
+    case .none:
+      do {
         stdin = try sharedDiscardFile()
         stdinNonBlockingWriter = nil
+      } catch {
+        try cleanupAndThrow(.io_openDevNull(.stdin, error))
+      }
 
-      case let .pipeFromParent(sizeInBytes):
-        let p = try FileDescriptor.pipe()
-        stdin = p.readEnd
-        stdinNonBlockingWriter = p.writeEnd
-        closeAfterSpawn.append(p.readEnd)
-        closeAfterTermination.append(p.writeEnd)
+    case let .pipeFromParent(sizeInBytes):
+      let p = try FileDescriptor.pipe()
+      stdin = p.readEnd
+      stdinNonBlockingWriter = p.writeEnd
+      closeAfterSpawn.append(p.readEnd)
+      closeAfterTermination.append(p.writeEnd)
+
+      do {
         // Writing to full pipe should not block.
         try Self.setNonBlocking(p.writeEnd)
-        try Self.setPipeBufferSize(writeEnd: p.writeEnd, sizeInBytes: sizeInBytes)
-
-      case let .readFromFile(fd, _):
-        stdin = fd
-        stdinNonBlockingWriter = nil
+      } catch {
+        try cleanupAndThrow(.io_setO_NONBLOCK(.stdin, error))
       }
-    } catch {
-      try cleanupAndThrow(.IOError(error))
+
+      do {
+        try Self.setPipeBufferSize(writeEnd: p.writeEnd, sizeInBytes: sizeInBytes)
+      } catch {
+        try cleanupAndThrow(.io_setPipeBufferSize(.stdin, error))
+      }
+
+    case let .readFromFile(fd, _):
+      stdin = fd
+      stdinNonBlockingWriter = nil
     }
 
     // =====================
@@ -144,20 +212,36 @@ extension Subprocess {
     // =====================
 
     func createOutputFiles(
+      _ errorCode: InitError.Code,
       _ o: InitStdout
     ) throws -> (write: FileDescriptor, read: FileDescriptor?) {
       switch o {
       case .discard:
-        let fd = try sharedDiscardFile()
-        return (fd, nil)
+        do {
+          let fd = try sharedDiscardFile()
+          return (fd, nil)
+        } catch {
+          try cleanupAndThrow(.io_openDevNull(errorCode, error))
+        }
 
       case let .pipeToParent(sizeInBytes):
         let (readEnd, writeEnd) = try FileDescriptor.pipe()
         closeAfterTermination.append(readEnd)
         closeAfterSpawn.append(writeEnd)
-        // Reading from an empty pipe should not block.
-        try Self.setNonBlocking(readEnd)
-        try Self.setPipeBufferSize(writeEnd: writeEnd, sizeInBytes: sizeInBytes)
+
+        do {
+          // Reading from an empty pipe should not block.
+          try Self.setNonBlocking(readEnd)
+        } catch {
+          try cleanupAndThrow(.io_setO_NONBLOCK(errorCode, error))
+        }
+
+        do {
+          try Self.setPipeBufferSize(writeEnd: writeEnd, sizeInBytes: sizeInBytes)
+        } catch {
+          try cleanupAndThrow(.io_setPipeBufferSize(errorCode, error))
+        }
+
         return (writeEnd, readEnd)
 
       case let .writeToFile(fd, _):
@@ -165,23 +249,8 @@ extension Subprocess {
       }
     }
 
-    let stdout: FileDescriptor
-    let stdoutNonBlockingReader: FileDescriptor?
-
-    do {
-      (stdout, stdoutNonBlockingReader) = try createOutputFiles(stdoutArg)
-    } catch {
-      try cleanupAndThrow(.IOError(error))
-    }
-
-    let stderr: FileDescriptor
-    let stderrNonBlockingReader: FileDescriptor?
-
-    do {
-      (stderr, stderrNonBlockingReader) = try createOutputFiles(stderrArg)
-    } catch {
-      try cleanupAndThrow(.IOError(error))
-    }
+    let (stdout, stdoutNonBlockingReader) = try createOutputFiles(.stdout, stdoutArg)
+    let (stderr, stderrNonBlockingReader) = try createOutputFiles(.stderr, stderrArg)
 
     // =============
     // === Spawn ===
@@ -200,7 +269,7 @@ extension Subprocess {
 
     switch spawnResult {
     case let .success(p): pid = p
-    case let .failure(e): try cleanupAndThrow(.spawnError(e))
+    case let .failure(e): try cleanupAndThrow(e)
     }
 
     // We can close the pipes that were moved to the child as 'dup2' was used.

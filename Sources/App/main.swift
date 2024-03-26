@@ -182,7 +182,15 @@ func executablePath_doesNotExist() async throws {
     _ = try Subprocess(executablePath: executablePath)
     print("🔴 We somehow executed:", executablePath)
   } catch {
-    print("🟢 Error:", error)
+    if let initError = error as? Subprocess.InitError {
+      if initError.code == .exec && (initError.source as? Errno) == Errno.noSuchFileOrDirectory {
+        print("🟢", error)
+      } else {
+        print("🔴 Invalid init error:", error)
+      }
+    } else {
+      print("🔴 Invalid error:", error)
+    }
   }
 }
 
