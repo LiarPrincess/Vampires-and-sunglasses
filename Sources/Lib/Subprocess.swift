@@ -7,10 +7,13 @@ import Glibc
 import Foundation
 import SystemPackage
 
-// swiftlint:disable nesting
+// swiftlint:disable file_length
 
+// swiftlint:disable:next line_length
 private let stdinIsNotPipeError = "Subprocess.stdin can only be used if 'pipeFromParent' was selected during initialization."
+// swiftlint:disable:next line_length
 private let stdoutIsNotPipeError = "Subprocess.stdout can only be used if 'pipeToParent' was selected during initialization."
+// swiftlint:disable:next line_length
 private let stderrIsNotPipeError = "Subprocess.stderr can only be used if 'pipeToParent' was selected during initialization."
 
 public actor Subprocess {

@@ -195,7 +195,7 @@ extension Subprocess {
     public func readAll() async throws -> Data {
       var result = Data()
 
-      try await self.readAll() { (buffer: UnsafeMutableRawBufferPointer, count: Int) in
+      try await self.readAll { (buffer: UnsafeMutableRawBufferPointer, count: Int) in
         let ptr = buffer.baseAddress!.assumingMemoryBound(to: UInt8.self)
         result.append(ptr, count: count)
       }
@@ -218,7 +218,7 @@ extension Subprocess {
 
     /// Read and throw away all of the data. Closed file -> `EBADF`.
     internal func readAllDiscardingResult() async throws {
-      try await self.readAll() { (_, _) in }
+      try await self.readAll { (_, _) in }
     }
 
     private func readAll(onDataRead: (UnsafeMutableRawBufferPointer, Int) -> Void) async throws {
@@ -262,7 +262,6 @@ extension Subprocess {
       }
     }
 
-    // swiftlint:disable:next nesting
     private enum ReadResult {
       case ok(byteCount: Int)
       case noDataAvailableOnNonBlockingFile

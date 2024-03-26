@@ -79,7 +79,11 @@ func wait_lateCancellation() async throws {
 
   let cancelledTask = Task.detached {
     let status = try? await process.waitForTermination()
-    print(status == nil ? "🟢" : "🔴", "Exit status:", status.map(String.init) ?? "nil", "<-- cancelled task")
+    print(
+      status == nil ? "🟢" : "🔴",
+      "Exit status:",
+      status.map(String.init) ?? "nil", "<-- cancelled task"
+    )
   }
 
   // Wait until it hits 'process.waitForTermination()'

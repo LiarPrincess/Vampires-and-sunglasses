@@ -7,6 +7,9 @@ line_length:
   warning: 100
   error: 120
 
+nesting:
+  type_level: 2
+
 disabled_rules:
   - todo
   - identifier_name
