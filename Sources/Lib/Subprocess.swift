@@ -7,8 +7,6 @@ import Glibc
 import Foundation
 import SystemPackage
 
-// swiftlint:disable file_length
-
 // swiftlint:disable:next line_length
 private let stdinIsNotPipeError = "Subprocess.stdin can only be used if 'pipeFromParent' was selected during initialization."
 // swiftlint:disable:next line_length
@@ -73,9 +71,6 @@ public actor Subprocess {
   ///
   /// Reads are non-blocking, meaning that they will return immediately if there
   /// is no data waiting in a buffer.
-  ///
-  /// This object can be used after the process termination. This allows reading
-  /// the data collected in the pipe buffer after the is no longer running.
   public var stdout: Output {
     guard let s = self._stdout else { preconditionFailure(stdoutIsNotPipeError) }
     return s
@@ -85,9 +80,6 @@ public actor Subprocess {
   ///
   /// Reads are non-blocking, meaning that they will return immediately if there
   /// is no data waiting in a buffer.
-  ///
-  /// This object can be used after the process termination. This allows reading
-  /// the data collected in the pipe buffer after the is no longer running.
   public var stderr: Output {
     guard let s = self._stderr else { preconditionFailure(stderrIsNotPipeError) }
     return s
@@ -196,8 +188,9 @@ public actor Subprocess {
         self.onWait(suspension: suspension, continuation: continuation)
       }
     } onCancel: {
-      // 'withTaskCancellationHandler' may immediately call this block (if the current
-      // task is cancelled), or call it later (if the task is cancelled later).
+      // 'withTaskCancellationHandler' may:
+      // - immediately call this block if the current task is cancelled
+      // - call it later if the task is cancelled later
       Task { await self.onWaitCancellation(suspension: suspension) }
     }
   }

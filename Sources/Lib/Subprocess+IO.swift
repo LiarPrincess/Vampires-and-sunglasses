@@ -17,6 +17,12 @@ private struct File {
 
   fileprivate func getFileDescriptorUnlessCancelled() throws -> FileDescriptor {
     try Task.checkCancellation()
+
+    // Prevent unintended read/write when file descriptor is re-used.
+    if self.isSet(Self.isClosedMask) {
+      throw Errno.badFileDescriptor
+    }
+
     return fd
   }
 
@@ -185,7 +191,8 @@ extension Subprocess {
       let fd = try self.file.getFileDescriptorUnlessCancelled()
 
       switch try self.read(fd, into: buffer) {
-      case .ok(let byteCount): return byteCount
+      case .eof: return 0
+      case .data(let byteCount): return byteCount
       case .noDataAvailableOnNonBlockingFile: return nil
       case .error(let e): throw e
       }
@@ -237,15 +244,10 @@ extension Subprocess {
         try Task.checkCancellation()
 
         switch try self.read(fd, into: buffer) {
-        case .ok(let byteCount):
-          // read(2)
-          // If the file offset is at or past the end of file, no bytes are read,
-          // and read() returns zero.
-          // For pipes this means that the writing end is closed.
-          if byteCount == 0 {
-            return
-          }
+        case .eof:
+          return
 
+        case .data(let byteCount):
           onDataRead(buffer, byteCount)
 
         case .noDataAvailableOnNonBlockingFile:
@@ -263,7 +265,8 @@ extension Subprocess {
     }
 
     private enum ReadResult {
-      case ok(byteCount: Int)
+      case eof
+      case data(byteCount: Int)
       case noDataAvailableOnNonBlockingFile
       case error(Error)
     }
@@ -274,7 +277,16 @@ extension Subprocess {
     ) throws -> ReadResult {
       do {
         let byteCount = try fd.read(into: buffer)
-        return .ok(byteCount: byteCount)
+
+        // read(2)
+        // If the file offset is at or past the end of file, no bytes are read,
+        // and read() returns zero.
+        // For pipes this means that the writing end is closed.
+        if byteCount == 0 {
+          return .eof
+        }
+
+        return .data(byteCount: byteCount)
       } catch Errno.wouldBlock, Errno.resourceTemporarilyUnavailable {
         // EAGAIN The file descriptor fd refers to a file other than a
         //        socket and has been marked nonblocking (O_NONBLOCK), and
