@@ -232,73 +232,67 @@ internal func SYSTEM_WAIT_FOR_TERMINATION_IN_BACKGROUND(process: Subprocess) {
     // - FastChildWatcher - waitpid(-1,  os.WNOHANG) in a loop.
     // - MultiLoopChildWatcher - signals. Ugh… nope.
     // - ThreadedChildWatcher - what we have here.
-    await ThreadedMort.startWaiting(for: process)
+    let exitStatus = await ThreadedMort.waitpid(process: process)
+    await process.TERMINATION_CALLBACK(exitStatus: exitStatus)
   }
 }
 
 /// Mort is a Death helper.
 /// Mort does not speak in uppercase.
 /// (Unless Mort takes Death duties, but that's a spoiler.)
-@MainActor
 private enum ThreadedMort {
 
-  private struct SubprocessInfo {
-    fileprivate let process: Subprocess
-    fileprivate let threadId: pthread_t
+  fileprivate typealias ExitStatus = CInt
+  fileprivate typealias Continuation = UnsafeContinuation<(pthread_t, ExitStatus), Never>
+
+  // Argument passed to waiting thread.
+  fileprivate struct Arg {
+    let pid: pid_t
+    let onTermination: Continuation
   }
 
-  private static var pidToInfo = [pid_t: SubprocessInfo]()
-
-  fileprivate static func startWaiting(for process: Subprocess) {
+  /// Returns exit status.
+  fileprivate static func waitpid(process: Subprocess) async -> ExitStatus {
     let pid = process.pid
     print("[\(pid)] Starting termination watcher.")
 
-    let args = UnsafeMutablePointer<pid_t>.allocate(capacity: 1)
-    args.initialize(to: process.pid)
+    let (threadId, exitStatus) = await withUnsafeContinuation { (continuation: Continuation) in
+      let args = UnsafeMutablePointer<Arg>.allocate(capacity: 1)
+      args.initialize(to: Arg(pid: process.pid, onTermination: continuation))
 
-// TODO: Things here may not be correct. Review later.
-// TODO: Low priority/QoS? This leads to priority inversion, but it is implied anyway.
+      // TODO: args.deallocate()
+      // TODO: Things here may not be correct. Review later.
+      // TODO: Low priority/QoS? This leads to priority inversion, but it is implied anyway.
 
 #if os(macOS)
-    var threadId: pthread_t?
-    let result = pthread_create(&threadId, nil, threadedMort_waitFn(args:), args)
+      var threadId: pthread_t?
+      let result = pthread_create(&threadId, nil, threadedMort_waitFn(args:), args)
 #elseif os(Linux)
-    var threadId: pthread_t = 0
-    let result = pthread_create(&threadId, nil, threadedMort_waitFn_linux(args:), args)
+      var threadId: pthread_t = 0
+      let result = pthread_create(&threadId, nil, threadedMort_waitFn_linux(args:), args)
 #endif
 
-    if result != 0 {
-      fatalError("Process wait thread: creation failed.")
-    }
+      if result != 0 {
+        fatalError("Process wait thread: creation failed.")
+      }
 
 #if os(macOS)
-    guard let threadId = threadId else {
-      fatalError("Process wait thread: creation failed - no threadId.")
-    }
+      if threadId == nil {
+        fatalError("Process wait thread: creation failed - no threadId.")
+      }
 #endif
-
-    Self.pidToInfo[pid] = SubprocessInfo(process: process, threadId: threadId)
-  }
-
-  fileprivate static func callProcessTerminationCallback(pid: pid_t, exitStatus: CInt) async {
-    print("[\(pid)] Terminated, status: \(exitStatus).")
-
-    guard let info = Self.pidToInfo[pid] else {
-      fatalError("Process wait thread: no process?")
     }
 
-    // We no longer wait for the process.
-    Self.pidToInfo[pid] = nil
-
-    // Mort assumes the duties of Death. (Spoiler!)
-    await info.process.TERMINATION_CALLBACK(exitStatus: exitStatus)
+    print("[\(pid)] Terminated, status: \(exitStatus).")
 
     // 'join' duration should be ~650 ns
     // let start = DispatchTime.now()
     var result: UnsafeMutableRawPointer?
-    pthread_join(info.threadId, &result)
+    pthread_join(threadId, &result)
     // let duration = DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds
-    // print("[\(pid)] 'waitpid' thread: joined in \(duration) ns.")
+    // print("[\(pid)] ⏰ 'waitpid' thread: joined in \(duration) ns.")
+
+    return exitStatus
   }
 }
 
@@ -314,8 +308,9 @@ private func threadedMort_waitFn_linux(args: UnsafeMutableRawPointer?) -> Unsafe
 #endif
 
 private func threadedMort_waitFn(args: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer? {
-  let pidPtr = args.bindMemory(to: pid_t.self, capacity: 1)
-  let pid = pidPtr.pointee
+  let argPtr = args.bindMemory(to: ThreadedMort.Arg.self, capacity: 1)
+  let arg = argPtr.pointee
+  let pid = arg.pid
 
   var exitStatus: CInt = Subprocess.exitStatusIfWeDontKnowTheRealOne
   var isRunning = true
@@ -387,10 +382,8 @@ private func threadedMort_waitFn(args: UnsafeMutableRawPointer) -> UnsafeMutable
     }
   }
 
-  let exitStatusCapture = exitStatus
-  Task.detached {
-    await ThreadedMort.callProcessTerminationCallback(pid: pid, exitStatus: exitStatusCapture)
-  }
-
+  // Go back to Swift concurrency.
+  let threadId = pthread_self()
+  arg.onTermination.resume(returning: (threadId, exitStatus))
   return nil
 }
