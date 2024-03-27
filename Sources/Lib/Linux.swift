@@ -8,6 +8,7 @@ import CLib
 import Foundation
 import SystemPackage
 
+// swiftlint:disable file_length
 // swiftlint:disable function_parameter_count
 // swiftlint:disable cyclomatic_complexity
 // swiftlint:disable function_body_length
@@ -232,74 +233,89 @@ internal func SYSTEM_WAIT_FOR_TERMINATION_IN_BACKGROUND(process: Subprocess) {
     // - FastChildWatcher - waitpid(-1,  os.WNOHANG) in a loop.
     // - MultiLoopChildWatcher - signals. Ugh… nope.
     // - ThreadedChildWatcher - what we have here.
-    let exitStatus = await ThreadedMort.waitpid(process: process)
-    await process.TERMINATION_CALLBACK(exitStatus: exitStatus)
+    await ThreadedMort.waitpid(process: process)
   }
 }
 
 /// Mort is a Death helper.
 /// Mort does not speak in uppercase.
 /// (Unless Mort takes Death duties, but that's a spoiler.)
+@MainActor
 private enum ThreadedMort {
 
-  fileprivate typealias ExitStatus = CInt
-  fileprivate typealias Continuation = UnsafeContinuation<ExitStatus, Never>
-
-  // Argument passed to waiting thread.
-  fileprivate struct Args {
-    let pid: pid_t
-    let onTermination: Continuation
+  private struct SubprocessInfo {
+    fileprivate let process: Subprocess
+    // To deallocate it after termination.
+    fileprivate let argsPtr: UnsafeMutablePointer<pid_t>
   }
 
-  /// Returns exit status.
-  fileprivate static func waitpid(process: Subprocess) async -> ExitStatus {
+  private static var pidToInfo = [pid_t: SubprocessInfo]()
+
+  fileprivate static func waitpid(process: Subprocess) {
+    // We could use 'UnsafeContinuation' and resume it in the 'waitpid' thread,
+    // but Swift will not exit as long as there is an alive continuation.
+    // Quite annoying when you want to create a daemon-like behavior.
+
     let pid = process.pid
     print("[\(pid)] Starting termination watcher.")
 
-    let threadArgs = UnsafeMutablePointer<Args>.allocate(capacity: 1)
-    defer { threadArgs.deallocate() }
+    let args = UnsafeMutablePointer<pid_t>.allocate(capacity: 1)
+    args.initialize(to: process.pid)
 
-    let exitStatus = await withUnsafeContinuation { (continuation: Continuation) in
-      threadArgs.initialize(to: Args(pid: process.pid, onTermination: continuation))
-
-      var attr = pthread_attr_t()
-      var result = pthread_attr_init(&attr)
-      if result != 0 {
-        fatalError("Process wait thread: pthread_attr_init failed: \(result).")
-      }
-
-      // Make it detached, so that we do not have to join it.
-      result = pthread_attr_setdetachstate(&attr, CInt(PTHREAD_CREATE_DETACHED))
-      if result != 0 {
-        fatalError("Process wait thread: pthread_attr_setdetachstate failed: \(result).")
-      }
-
-#if os(macOS)
-      var threadId: pthread_t?
-      result = pthread_create(&threadId, &attr, threadedMort_waitFn(args:), threadArgs)
-#elseif os(Linux)
-      var threadId: pthread_t = 0
-      result = pthread_create(&threadId, &attr, threadedMort_waitFn_linux(args:), threadArgs)
-#endif
-
-      if result != 0 {
-        fatalError("Process wait thread: pthread_create failed: \(result).")
-      }
-
-#if os(macOS)
-      if threadId == nil {
-        fatalError("Process wait thread: pthread_create failed: no threadId.")
-      }
-#endif
-
-      result = pthread_attr_destroy(&attr)
-      if result != 0 {
-        fatalError("Process wait thread: pthread_attr_destroy failed: \(result).")
-      }
+    var attr = pthread_attr_t()
+    var result = pthread_attr_init(&attr)
+    if result != 0 {
+      fatalError("Process wait thread: pthread_attr_init failed: \(result).")
     }
 
+    // Make it detached, so that we do not have to join it.
+    result = pthread_attr_setdetachstate(&attr, CInt(PTHREAD_CREATE_DETACHED))
+    if result != 0 {
+      fatalError("Process wait thread: pthread_attr_setdetachstate failed: \(result).")
+    }
+
+#if os(macOS)
+    var threadId: pthread_t?
+    result = pthread_create(&threadId, &attr, threadedMort_waitFn(args:), args)
+#elseif os(Linux)
+    var threadId: pthread_t = 0
+    result = pthread_create(&threadId, &attr, threadedMort_waitFn_linux(args:), args)
+#endif
+
+    if result != 0 {
+      fatalError("Process wait thread: pthread_create failed: \(result).")
+    }
+
+#if os(macOS)
+    if threadId == nil {
+      fatalError("Process wait thread: pthread_create failed: no threadId.")
+    }
+#endif
+
+    result = pthread_attr_destroy(&attr)
+    if result != 0 {
+      fatalError("Process wait thread: pthread_attr_destroy failed: \(result).")
+    }
+
+    Self.pidToInfo[pid] = SubprocessInfo(process: process, argsPtr: args)
+  }
+
+  fileprivate static func callProcessTerminationCallback(pid: pid_t, exitStatus: CInt) async {
     print("[\(pid)] Terminated, status: \(exitStatus).")
-    return exitStatus
+
+    guard let info = Self.pidToInfo[pid] else {
+      fatalError("Process wait thread: no process?")
+    }
+
+    // We no longer wait for the process.
+    Self.pidToInfo[pid] = nil
+
+    // We do not need to 'pthread_join' because we used 'PTHREAD_CREATE_DETACHED'.
+    // But we still have to deallocate args.
+    info.argsPtr.deallocate()
+
+    // Mort assumes the duties of Death. (Spoiler!)
+    await info.process.TERMINATION_CALLBACK(exitStatus: exitStatus)
   }
 }
 
@@ -315,9 +331,8 @@ private func threadedMort_waitFn_linux(args: UnsafeMutableRawPointer?) -> Unsafe
 #endif
 
 private func threadedMort_waitFn(args: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer? {
-  let argPtr = args.bindMemory(to: ThreadedMort.Args.self, capacity: 1)
-  let arg = argPtr.pointee
-  let pid = arg.pid
+  let pidPtr = args.bindMemory(to: pid_t.self, capacity: 1)
+  let pid = pidPtr.pointee
 
   var exitStatus: CInt = Subprocess.exitStatusIfWeDontKnowTheRealOne
   var isRunning = true
@@ -389,7 +404,9 @@ private func threadedMort_waitFn(args: UnsafeMutableRawPointer) -> UnsafeMutable
     }
   }
 
-  // Go back to Swift concurrency.
-  arg.onTermination.resume(returning: exitStatus)
+  Task.detached { [exitStatus] in
+    await ThreadedMort.callProcessTerminationCallback(pid: pid, exitStatus: exitStatus)
+  }
+
   return nil
 }
