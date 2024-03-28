@@ -10,6 +10,9 @@ line_length:
 nesting:
   type_level: 2
 
+type_name:
+  allowed_symbols: ["_"]
+
 disabled_rules:
   - todo
   - identifier_name

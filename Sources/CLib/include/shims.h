@@ -7,10 +7,10 @@
 /* === exit status === */
 /* =================== */
 
-int _clib_WIFEXITED(int status);
-int _clib_WEXITSTATUS(int status);
-int _clib_WIFSIGNALED(int status);
-int _clib_WTERMSIG(int status);
+int _CLIB_WIFEXITED(int status);
+int _CLIB_WEXITSTATUS(int status);
+int _CLIB_WIFSIGNALED(int status);
+int _CLIB_WTERMSIG(int status);
 
 /* ============= */
 /* === fcntl === */

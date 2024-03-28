@@ -1,3 +1,5 @@
+#if canImport(Darwin) || canImport(Glibc)
+
 #if canImport(Darwin)
 import Darwin
 #elseif canImport(Glibc)
@@ -13,7 +15,7 @@ import SystemPackage
 // swiftlint:disable cyclomatic_complexity
 // swiftlint:disable function_body_length
 
-#if os(macOS)
+#if canImport(Darwin)
 internal var system_errno: CInt {
   get { Darwin.errno }
   set { Darwin.errno = newValue }
@@ -32,8 +34,8 @@ internal func system_spawn(
   stdin: FileDescriptor,
   stdout: FileDescriptor,
   stderr: FileDescriptor
-) -> Result<pid_t, Subprocess.InitError> {
-  func cleanupAndThrow(_ e: Subprocess.InitError) -> Result<pid_t, Subprocess.InitError> {
+) -> Result<pid_t, InitError> {
+  func cleanupAndThrow(_ e: InitError) -> Result<pid_t, InitError> {
     // No cleanup
     return .failure(e)
   }
@@ -138,7 +140,7 @@ internal func system_spawn(
   }
 
   if pid < 0 {
-    let error: Subprocess.InitError
+    let error: InitError
 
     switch pid {
     case _CLIB_FORK_EXEC_ERR_FORK:
@@ -219,9 +221,19 @@ internal func system_kill(pid: pid_t, signal: CInt) -> Errno? {
   return nil
 }
 
+internal protocol System_ChildWatcher {
+  /// Fork success: `waitpid`. Can't fail.
+  func resume(process: Subprocess)
+  /// Fork failure: cancel `waitpid`. Can't fail.
+  func cancel()
+}
+
+/// Create the child watcher.
+/// Don't forget to call `watcher.waitpid()` or `watcher.cancel()` later!
+///
 /// Uppercase because Death SPEAKS IN UPPERCASE.
 /// https://en.wikipedia.org/wiki/Death_(Discworld)
-internal func SYSTEM_MONITOR_TERMINATION(process: Subprocess) {
+internal func SYSTEM_INIT_CHILD_WATCHER() -> Result<some System_ChildWatcher, InitError> {
   // Threaded solution is not the best, but it is ultra portable :)
   //
   // Python has a nice collection of possible watchers:
@@ -232,95 +244,152 @@ internal func SYSTEM_MONITOR_TERMINATION(process: Subprocess) {
   // - FastChildWatcher - waitpid(-1,  os.WNOHANG) in a loop.
   // - MultiLoopChildWatcher - signals. Ugh… nope.
   // - ThreadedChildWatcher - what we have here.
-  ThreadedMort.shared.monitorTermination(process: process)
+  return System_ThreadedChildWatcher.create()
 }
 
-/// Mort is a Death helper.
-/// Mort does not speak in uppercase.
-/// (Unless Mort takes Death duties, but that's a spoiler.)
-private final class ThreadedMort {
+internal final class System_ThreadedChildWatcher: System_ChildWatcher {
 
-  // Static variables are thread safe:
-  // https://developer.apple.com/documentation/swift/managing-a-shared-resource-using-a-singleton
-#if swift(>=5.10)
-  nonisolated(unsafe) fileprivate static let shared = ThreadedMort()
-#else
-  fileprivate static let shared = ThreadedMort()
-#endif
+  /// Args that we pass to the child thread.
+  fileprivate struct Args {
 
-  private var pidToProcess = [pid_t: Subprocess]()
-  private let lock = NSLock()
+    fileprivate let ptr: UnsafeMutablePointer<System_ThreadedChildWatcher>
 
-  // Called on Swift concurrency thread.
-  fileprivate func monitorTermination(process: Subprocess) {
-    // We could use 'UnsafeContinuation' and resume it on the child thread,
-    // but Swift will not exit as long as there is an alive continuation.
-    // Quite annoying when you want to create a daemon-like behavior.
-
-    let pid = process.pid
-    print("[\(pid)] Starting termination watcher.")
-
-    let args = UnsafeMutablePointer<pid_t>.allocate(capacity: 1)
-    args.initialize(to: process.pid)
-
-    var attr = pthread_attr_t()
-    var result = pthread_attr_init(&attr)
-    if result != 0 {
-      fatalError("Process wait thread: pthread_attr_init failed: \(result).")
+    fileprivate init(_ object: System_ThreadedChildWatcher) {
+      self.ptr = UnsafeMutablePointer<System_ThreadedChildWatcher>.allocate(capacity: 1)
+      self.ptr.initialize(to: object)
     }
 
-    // Make it detached, so that we do not have to join it.
-    result = pthread_attr_setdetachstate(&attr, CInt(PTHREAD_CREATE_DETACHED))
-    if result != 0 {
-      fatalError("Process wait thread: pthread_attr_setdetachstate failed: \(result).")
+    /// Extract `System_ThreadedChildWatcher` and deallocate.
+    fileprivate static func consume(_ ptr: UnsafeMutableRawPointer) -> System_ThreadedChildWatcher {
+      let bind = ptr.bindMemory(to: System_ThreadedChildWatcher.self, capacity: 1)
+      let result = bind.pointee
+      Self.deallocate(bind)
+      return result
     }
 
-    // Lock has to encompass the 'pthread_create', so that the child thread
-    // does not access the 'self.pidToProcess' before us.
-    // No async calls permitted below!
-    self.lock.lock()
-    defer { self.lock.unlock() }
-
-#if os(macOS)
-    var threadId: pthread_t?
-    result = pthread_create(&threadId, &attr, threadedMort_waitFn(args:), args)
-#elseif os(Linux)
-    var threadId: pthread_t = 0
-    result = pthread_create(&threadId, &attr, threadedMort_waitFn_linux(args:), args)
-#endif
-
-    if result != 0 {
-      fatalError("Process wait thread: pthread_create failed: \(result).")
+    fileprivate func deallocate() {
+      Self.deallocate(self.ptr)
     }
 
-#if os(macOS)
-    if threadId == nil {
-      fatalError("Process wait thread: pthread_create failed: no threadId.")
+    private static func deallocate(_ ptr: UnsafeMutablePointer<System_ThreadedChildWatcher>) {
+      ptr.deinitialize(count: 1)
+      ptr.deallocate()
     }
-#endif
-
-    result = pthread_attr_destroy(&attr)
-    if result != 0 {
-      fatalError("Process wait thread: pthread_attr_destroy failed: \(result).")
-    }
-
-    self.pidToProcess[pid] = process
   }
 
-  // Called on the child thread.
-  fileprivate func onTermination(pid: pid_t, exitStatus: CInt) {
-    print("[\(pid)] Terminated, status: \(exitStatus).")
+  private var process: Subprocess?
+  /// Synchronization primitive between us and our child.
+  ///
+  /// 1. Parent acquires `lock`
+  /// 2. Parent forks
+  /// 3. Parent sets `pid` and releases the `lock`
+  /// 4. Child resumes
+  private let lock = NSLock()
 
-    self.lock.lock()
+#if DEBUG
+  private var hasResumedChild = false
+#endif
 
-    guard let process = self.pidToProcess.removeValue(forKey: pid) else {
-      fatalError("Process wait thread: no process?")
+  deinit {
+    let pid = self.process?.pid
+    let pidString = pid.map(String.init) ?? "<fork_failed>"
+    print("[\(pidString)] ThreadedChildWatcher.deinit")
+
+#if DEBUG
+    assert(
+      self.hasResumedChild,
+      "[ThreadedChildWatcher] Missing call to waitpid/cancel?"
+    )
+#endif
+  }
+
+  internal typealias CreateResult = Result<System_ThreadedChildWatcher, InitError>
+
+  /// [Parent] Start the `waitpid` thread.
+  internal static func create() -> CreateResult {
+    let watcher = System_ThreadedChildWatcher()
+    let args = Args(watcher)
+
+    // Pause the child as we do not know the 'pid' yet.
+    // (The child is not even running…)
+    watcher.lock.lock()
+
+    func cleanupAndReturn(_ message: String) -> CreateResult {
+      args.deallocate()
+      return .failure(InitError(
+        code: .terminationWatcher,
+        message: message,
+        source: Errno.current
+      ))
     }
 
+    var attr = pthread_attr_t()
+    pthread_attr_init(&attr)
+    defer { pthread_attr_destroy(&attr) }
+
+    // Make it detached, so that we do not have to join it.
+    var result = pthread_attr_setdetachstate(&attr, CInt(PTHREAD_CREATE_DETACHED))
+    if result != 0 {
+      return cleanupAndReturn("Unable to set detach attribute")
+    }
+
+#if canImport(Darwin)
+    var threadId: pthread_t?
+    result = pthread_create(&threadId, &attr, threaded_child_watcher_fn(args:), args.ptr)
+#elseif canImport(Glibc)
+    var threadId: pthread_t = 0
+    result = pthread_create(&threadId, &attr, threaded_child_watcher_fn_linux(args:), args.ptr)
+#endif
+
+    if result != 0 {
+      return cleanupAndReturn("Unable to start thread")
+    }
+
+#if canImport(Darwin)
+    if threadId == nil {
+      return cleanupAndReturn("Unable to start thread: no threadId")
+    }
+#endif
+
+    // We still hold the lock!
+    return .success(watcher)
+  }
+
+  /// [Parent] Resume the child thread with process to `waitpid`.
+  internal func resume(process: Subprocess) {
+#if DEBUG
+    self.hasResumedChild = true
+#endif
+    self.process = process
     self.lock.unlock()
+  }
+
+  /// [Parent] Resume the child thread without the process.
+  internal func cancel() {
+#if DEBUG
+    self.hasResumedChild = true
+#endif
+    self.lock.unlock()
+  }
+
+  /// [Child] Wait until we know whether the `fork` succeeded.
+  fileprivate func waitUntilFork() -> pid_t? {
+    self.lock.lock()
+    let pid = self.process?.pid
+    self.lock.unlock()
+    return pid
+  }
+
+  // [Child] Notify that the process has terminated.
+  fileprivate func onTermination(exitStatus: CInt) {
+    guard let process = self.process else {
+      fatalError("[ThreadedChildWatcher] no process?")
+    }
+
+    let pid = process.pid
+    print("[\(pid)] Terminated, status: \(exitStatus).")
 
     Task.detached {
-      // Mort assumes the duties of Death. (Spoiler!)
       await process.TERMINATION_CALLBACK(exitStatus: exitStatus)
     }
   }
@@ -328,24 +397,31 @@ private final class ThreadedMort {
 
 #if os(Linux)
 // On Linux we have 'args: UnsafeMutableRawPointer?'.
-private func threadedMort_waitFn_linux(args: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer? {
+private func threaded_child_watcher_fn_linux(
+  args: UnsafeMutableRawPointer?
+) -> UnsafeMutableRawPointer? {
   guard let args = args else {
     fatalError("Process wait thread: arguments without pid.")
   }
 
-  return threadedMort_waitFn(args: args)
+  return threaded_child_watcher_fn(args: args)
 }
 #endif
 
-private func threadedMort_waitFn(args: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer? {
-  let pid = args.load(as: pid_t.self)
-  args.deallocate()
+private func threaded_child_watcher_fn(
+  args: UnsafeMutableRawPointer
+) -> UnsafeMutableRawPointer? {
+  let watcher = System_ThreadedChildWatcher.Args.consume(args)
+
+  guard let pid = watcher.waitUntilFork() else {
+    return nil
+  }
 
   var isRunning = true
   var exitStatus: CInt = Subprocess.exitStatusIfWeDontKnowTheRealOne
 
   while isRunning {
-    switch Waitpid(pid: pid) {
+    switch System_Waitpid(pid: pid) {
     case .tryAgain:
       break
     case .terminated(exitStatus: let s):
@@ -356,11 +432,11 @@ private func threadedMort_waitFn(args: UnsafeMutableRawPointer) -> UnsafeMutable
     }
   }
 
-  ThreadedMort.shared.onTermination(pid: pid, exitStatus: exitStatus)
+  watcher.onTermination(exitStatus: exitStatus)
   return nil
 }
 
-private enum Waitpid {
+private enum System_Waitpid {
   case tryAgain
   case terminated(exitStatus: CInt)
   case noChildProcess
@@ -371,9 +447,9 @@ private enum Waitpid {
     self = Self.create(pid: pid, result: result, status: status)
   }
 
-#if os(macOS)
+#if canImport(Darwin)
   private typealias Result = pid_t
-#elseif os(Linux)
+#elseif canImport(Glibc)
   private typealias Result = __pid_t
 #endif
 
@@ -385,8 +461,8 @@ private enum Waitpid {
 
     case pid:
       // https://github.com/python/cpython/blob/main/Modules/posixmodule.c#L16390
-      if _clib_WIFEXITED(status) != 0 {
-        let exitStatus = _clib_WEXITSTATUS(status)
+      if _CLIB_WIFEXITED(status) != 0 {
+        let exitStatus = _CLIB_WEXITSTATUS(status)
 
         // Sanity check to provide warranty on the function behavior.
         // It should not occur in practice
@@ -397,8 +473,8 @@ private enum Waitpid {
         return .terminated(exitStatus: exitStatus)
       }
 
-      if _clib_WIFSIGNALED(status) != 0 {
-        let signum = _clib_WTERMSIG(status)
+      if _CLIB_WIFSIGNALED(status) != 0 {
+        let signum = _CLIB_WTERMSIG(status)
 
         // Sanity check to provide warranty on the function behavior.
         // It should not occurs in practice
@@ -444,3 +520,5 @@ private enum Waitpid {
     }
   }
 }
+
+#endif // canImport(Darwin) || canImport(Glibc)

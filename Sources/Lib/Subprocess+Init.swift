@@ -4,6 +4,8 @@ import SystemPackage
 // swiftlint:disable function_body_length
 // swiftlint:disable cyclomatic_complexity
 
+internal typealias InitError = Subprocess.InitError
+
 extension Subprocess {
 
   public enum InitStdin: Sendable {
@@ -51,6 +53,8 @@ extension Subprocess {
       case fork
       /// Error when running the executable.
       case exec
+      /// Error when initializing the termination watcher.
+      case terminationWatcher
     }
 
     public var code: Code
@@ -72,6 +76,7 @@ extension Subprocess {
       case .stderr: name = "stderr"
       case .fork: name = "fork"
       case .exec: name = "exec"
+      case .terminationWatcher: name = "termination watcher"
       }
 
       let suffix = self.source.map { " (\($0))" } ?? ""
@@ -115,14 +120,17 @@ extension Subprocess {
     stdout stdoutArg: InitStdout = .discard,
     stderr stderrArg: InitStderr = .discard
   ) throws {
-    // Files send to the child.
+    /// Files send to the child.
     var closeAfterSpawn = [FileDescriptor]()
-    // Flies that stay in the parent (parent pipe ends).
+    /// Flies that stay in the parent (parent pipe ends).
     var closeAfterTermination = [FileDescriptor]()
+    /// Cancel watcher if 'fork' fails.
+    var watcherCleanup: System_ChildWatcher?
 
     func cleanupAndThrow(_ error: InitError) throws -> Never {
       closeAfterSpawn.closeAllIgnoringErrors()
       closeAfterTermination.closeAllIgnoringErrors()
+      watcherCleanup?.cancel()
       throw error
     }
 
@@ -252,6 +260,24 @@ extension Subprocess {
     let (stdout, stdoutNonBlockingReader) = try createOutputFiles(.stdout, stdoutArg)
     let (stderr, stderrNonBlockingReader) = try createOutputFiles(.stderr, stderrArg)
 
+    // ===========================
+    // === Termination watcher ===
+    // ===========================
+
+    let watcher: System_ChildWatcher
+    let watcherResult = SYSTEM_INIT_CHILD_WATCHER()
+
+    switch watcherResult {
+    case let .success(w):
+      // From now on:
+      // - 'cleanupAndThrow' will also cancel watcher
+      // - any 'async/yield' calls are forbidden! Do NOT leave the current thread!
+      watcher = w
+      watcherCleanup = w
+    case let .failure(e):
+      try cleanupAndThrow(e)
+    }
+
     // =============
     // === Spawn ===
     // =============
@@ -297,8 +323,8 @@ extension Subprocess {
       stderrNonBlockingReader: stderrNonBlockingReader
     )
 
+    watcher.resume(process: self)
     print("[\(pid)] \(executablePath)")
-    SYSTEM_MONITOR_TERMINATION(process: self)
   }
 
   private static func setNonBlocking(_ fd: FileDescriptor) throws {

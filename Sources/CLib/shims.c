@@ -11,10 +11,10 @@
 /* === exit status === */
 /* =================== */
 
-int _clib_WIFEXITED(int status) { return WIFEXITED(status); }
-int _clib_WEXITSTATUS(int status) { return WEXITSTATUS(status); }
-int _clib_WIFSIGNALED(int status) { return WIFSIGNALED(status); }
-int _clib_WTERMSIG(int status) { return WTERMSIG(status); }
+int _CLIB_WIFEXITED(int status) { return WIFEXITED(status); }
+int _CLIB_WEXITSTATUS(int status) { return WEXITSTATUS(status); }
+int _CLIB_WIFSIGNALED(int status) { return WIFSIGNALED(status); }
+int _CLIB_WTERMSIG(int status) { return WTERMSIG(status); }
 
 /* ============= */
 /* === fcntl === */
