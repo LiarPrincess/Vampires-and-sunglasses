@@ -7,18 +7,30 @@
 #include <unistd.h>
 #include <sys/wait.h>
 
+/* =================== */
+/* === exit status === */
+/* =================== */
+
 int _clib_WIFEXITED(int status) { return WIFEXITED(status); }
 int _clib_WEXITSTATUS(int status) { return WEXITSTATUS(status); }
 int _clib_WIFSIGNALED(int status) { return WIFSIGNALED(status); }
 int _clib_WTERMSIG(int status) { return WTERMSIG(status); }
 
+/* ============= */
+/* === fcntl === */
+/* ============= */
+
 #if __linux__
-const int _clib_F_SETPIPE_SZ = F_SETPIPE_SZ;
-const int _clib_F_GETPIPE_SZ = F_GETPIPE_SZ;
+const int _CLIB_F_SETPIPE_SZ = F_SETPIPE_SZ;
+const int _CLIB_F_GETPIPE_SZ = F_GETPIPE_SZ;
 #endif
 
 int _clib_fcntl_2(int fd, int cmd) { return fcntl(fd, cmd); }
 int _clib_fcntl_3(int fd, int cmd, int value) { return fcntl(fd, cmd, value); }
+
+/* ================= */
+/* === fork exec === */
+/* ================= */
 
 const pid_t _CLIB_FORK_EXEC_ERR_PIPE_OPEN = -1;
 const pid_t _CLIB_FORK_EXEC_ERR_FORK = -2;
@@ -76,7 +88,7 @@ pid_t _clib_fork_exec(
     close(exec_pipe_write);
 
     ssize_t n;
-    int result = 0;
+    pid_t result = 0;
     int buffer[2] = {0, 0};
 
     while (result == 0)
@@ -119,6 +131,9 @@ pid_t _clib_fork_exec(
   }
 
   // Child
+  // Until 'execve' we are operating in a limited environment,
+  // only the 'async-signal-safe' functions can be called, see list at:
+  // https://man7.org/linux/man-pages/man7/signal-safety.7.html
   close(exec_pipe_read);
 
   int err = dup2(fd_stdin, STDIN_FILENO);
@@ -168,7 +183,7 @@ pid_t _clib_fork_exec(
   sigfillset(&sigset_all);
   sigprocmask(SIG_UNBLOCK, &sigset_all, NULL);
 
-  // This will close 'exec_pipe_write' because of
+  // This will close 'exec_pipe_write' because of 'FD_CLOEXEC'.
   execve(path, argv, envp);
 
   // We should never get here!

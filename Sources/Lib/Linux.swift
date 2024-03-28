@@ -175,7 +175,7 @@ internal func system_fcntl_F_SETPIPE_SZ(
   assert(sizeInBytes >= 0)
 
 #if os(Linux)
-  let result = _clib_fcntl_3(writeEnd.rawValue, _clib_F_SETPIPE_SZ, sizeInBytes)
+  let result = _clib_fcntl_3(writeEnd.rawValue, _CLIB_F_SETPIPE_SZ, sizeInBytes)
 
   if result == -1 {
     return .current
@@ -221,38 +221,35 @@ internal func system_kill(pid: pid_t, signal: CInt) -> Errno? {
 
 /// Uppercase because Death SPEAKS IN UPPERCASE.
 /// https://en.wikipedia.org/wiki/Death_(Discworld)
-internal func SYSTEM_WAIT_FOR_TERMINATION_IN_BACKGROUND(process: Subprocess) {
-  Task.detached {
-    // Threaded solution is not the best, but it is ultra portable :)
-    //
-    // Python has a nice collection of possible watchers:
-    // https://github.com/python/cpython/blob/main/Lib/asyncio/unix_events.py#L868
-    //
-    // - PidfdChildWatcher - golden standard, but only on Linux.
-    // - SafeChildWatcher - waitpid(pid, os.WNOHANG) in a loop.
-    // - FastChildWatcher - waitpid(-1,  os.WNOHANG) in a loop.
-    // - MultiLoopChildWatcher - signals. Ugh… nope.
-    // - ThreadedChildWatcher - what we have here.
-    await ThreadedMort.waitpid(process: process)
-  }
+internal func SYSTEM_MONITOR_TERMINATION(process: Subprocess) {
+  // Threaded solution is not the best, but it is ultra portable :)
+  //
+  // Python has a nice collection of possible watchers:
+  // https://github.com/python/cpython/blob/main/Lib/asyncio/unix_events.py#L868
+  //
+  // - PidfdChildWatcher - golden standard, but only on Linux.
+  // - SafeChildWatcher - waitpid(pid, os.WNOHANG) in a loop.
+  // - FastChildWatcher - waitpid(-1,  os.WNOHANG) in a loop.
+  // - MultiLoopChildWatcher - signals. Ugh… nope.
+  // - ThreadedChildWatcher - what we have here.
+  ThreadedMort.shared.monitorTermination(process: process)
 }
 
 /// Mort is a Death helper.
 /// Mort does not speak in uppercase.
 /// (Unless Mort takes Death duties, but that's a spoiler.)
-@MainActor
-private enum ThreadedMort {
+private final class ThreadedMort {
 
-  private struct SubprocessInfo {
-    fileprivate let process: Subprocess
-    // To deallocate it after termination.
-    fileprivate let argsPtr: UnsafeMutablePointer<pid_t>
-  }
+  // This is thread safe:
+  // https://developer.apple.com/documentation/swift/managing-a-shared-resource-using-a-singleton
+  nonisolated(unsafe) fileprivate static let shared = ThreadedMort()
 
-  private static var pidToInfo = [pid_t: SubprocessInfo]()
+  private var pidToProcess = [pid_t: Subprocess]()
+  private let lock = NSLock()
 
-  fileprivate static func waitpid(process: Subprocess) {
-    // We could use 'UnsafeContinuation' and resume it in the 'waitpid' thread,
+  // Called on Swift concurrency thread.
+  fileprivate func monitorTermination(process: Subprocess) {
+    // We could use 'UnsafeContinuation' and resume it on the child thread,
     // but Swift will not exit as long as there is an alive continuation.
     // Quite annoying when you want to create a daemon-like behavior.
 
@@ -273,6 +270,12 @@ private enum ThreadedMort {
     if result != 0 {
       fatalError("Process wait thread: pthread_attr_setdetachstate failed: \(result).")
     }
+
+    // Lock has to encompass the 'pthread_create', so that the child thread
+    // does not access the 'self.pidToProcess' before us.
+    // No async calls permitted below!
+    self.lock.lock()
+    defer { self.lock.unlock() }
 
 #if os(macOS)
     var threadId: pthread_t?
@@ -297,25 +300,25 @@ private enum ThreadedMort {
       fatalError("Process wait thread: pthread_attr_destroy failed: \(result).")
     }
 
-    Self.pidToInfo[pid] = SubprocessInfo(process: process, argsPtr: args)
+    self.pidToProcess[pid] = process
   }
 
-  fileprivate static func callProcessTerminationCallback(pid: pid_t, exitStatus: CInt) async {
+  // Called on the child thread.
+  fileprivate func onTermination(pid: pid_t, exitStatus: CInt) {
     print("[\(pid)] Terminated, status: \(exitStatus).")
 
-    guard let info = Self.pidToInfo[pid] else {
+    self.lock.lock()
+
+    guard let process = self.pidToProcess.removeValue(forKey: pid) else {
       fatalError("Process wait thread: no process?")
     }
 
-    // We no longer wait for the process.
-    Self.pidToInfo[pid] = nil
+    self.lock.unlock()
 
-    // We do not need to 'pthread_join' because we used 'PTHREAD_CREATE_DETACHED'.
-    // But we still have to deallocate args.
-    info.argsPtr.deallocate()
-
-    // Mort assumes the duties of Death. (Spoiler!)
-    await info.process.TERMINATION_CALLBACK(exitStatus: exitStatus)
+    Task.detached {
+      // Mort assumes the duties of Death. (Spoiler!)
+      await process.TERMINATION_CALLBACK(exitStatus: exitStatus)
+    }
   }
 }
 
@@ -331,46 +334,73 @@ private func threadedMort_waitFn_linux(args: UnsafeMutableRawPointer?) -> Unsafe
 #endif
 
 private func threadedMort_waitFn(args: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer? {
-  let pidPtr = args.bindMemory(to: pid_t.self, capacity: 1)
-  let pid = pidPtr.pointee
+  let pid = args.load(as: pid_t.self)
+  args.deallocate()
 
-  var exitStatus: CInt = Subprocess.exitStatusIfWeDontKnowTheRealOne
   var isRunning = true
+  var exitStatus: CInt = Subprocess.exitStatusIfWeDontKnowTheRealOne
 
   while isRunning {
+    switch Waitpid(pid: pid) {
+    case .tryAgain:
+      break
+    case .terminated(exitStatus: let s):
+      exitStatus = s
+      isRunning = false
+    case .noChildProcess:
+      isRunning = false
+    }
+  }
+
+  ThreadedMort.shared.onTermination(pid: pid, exitStatus: exitStatus)
+  return nil
+}
+
+private enum Waitpid {
+  case tryAgain
+  case terminated(exitStatus: CInt)
+  case noChildProcess
+
+  fileprivate init(pid: pid_t) {
     var status: CInt = -1
     let result = waitpid(pid, &status, 0)
+    self = Self.create(pid: pid, result: result, status: status)
+  }
 
+  private static func create(pid: pid_t, result: __pid_t, status: CInt) -> Self {
     switch result {
     case 0:
-      // No change
-      break
+      // Only possible with WNOHANG.
+      return .tryAgain
 
     case pid:
       // https://github.com/python/cpython/blob/main/Modules/posixmodule.c#L16390
-      isRunning = false
-
       if _clib_WIFEXITED(status) != 0 {
-        exitStatus = _clib_WEXITSTATUS(status)
+        let exitStatus = _clib_WEXITSTATUS(status)
 
         // Sanity check to provide warranty on the function behavior.
         // It should not occur in practice
         if exitStatus < 0 {
-          fatalError("Process wait thread: WEXITSTATUS < 0.")
+          fatalError("waitpid: WEXITSTATUS < 0.")
         }
-      } else if _clib_WIFSIGNALED(status) != 0 {
+
+        return .terminated(exitStatus: exitStatus)
+      }
+
+      if _clib_WIFSIGNALED(status) != 0 {
         let signum = _clib_WTERMSIG(status)
 
         // Sanity check to provide warranty on the function behavior.
         // It should not occurs in practice
         if signum <= 0 {
-          fatalError("Process wait thread: WTERMSIG <= 0.")
+          fatalError("waitpid: WTERMSIG <= 0.")
         }
 
-        exitStatus = -signum
-      } else {
-        fatalError("Process wait thread: unknown exit status: \(status).")
+        // For signals we want negative 'exitStatus'.
+        return .terminated(exitStatus: -signum)
       }
+
+      fatalError("waitpid: unknown exit status: \(status).")
 
     case -1:
       // https://www.man7.org/linux/man-pages/man2/waitpid.2.html
@@ -378,35 +408,29 @@ private func threadedMort_waitFn(args: UnsafeMutableRawPointer) -> UnsafeMutable
       case .resourceTemporarilyUnavailable:
         // EAGAIN The PID file descriptor specified in id is nonblocking and
         //        the process that it refers to has not terminated.
-        break
+        return .tryAgain
       case .noChildProcess:
         // ECHILD (for waitpid() or waitid()) The process specified by pid
         //        (waitpid()) or idtype and id (waitid()) does not exist or
         //        is not a child of the calling process.  (This can happen
         //        for one's own child if the action for SIGCHLD is set to
-        //        SIG_IGN.  See also the Linux Notes section about threads.)
-        isRunning = false
+        //        SIG_IGN. See also the Linux Notes section about threads.)
+        return .noChildProcess
       case .interrupted:
         // EINTR WNOHANG was not set and an unblocked signal or a SIGCHLD
         //       was caught; see signal(7).
-        isRunning = false
+        return .tryAgain
       case .invalidArgument:
         // EINVAL The options argument was invalid.
-        fatalError("Process wait thread: waitpid -> EINVAL.")
+        fatalError("waitpid: EINVAL.")
       case .noSuchProcess:
         // ESRCH (for wait() or waitpid()) pid is equal to INT_MIN.
-        fatalError("Process wait thread: waitpid -> ESRCH.")
+        fatalError("waitpid: ESRCH.")
       default:
-        fatalError("Process wait thread: unknown waitpid errno: \(errno)")
+        fatalError("waitpid: unknown error: \(errno)")
       }
     default:
-      fatalError("Process wait thread: unknown waitpid result: \(result)")
+      fatalError("waitpid: unknown result \(result)")
     }
   }
-
-  Task.detached { [exitStatus] in
-    await ThreadedMort.callProcessTerminationCallback(pid: pid, exitStatus: exitStatus)
-  }
-
-  return nil
 }

@@ -298,7 +298,7 @@ extension Subprocess {
     )
 
     print("[\(pid)] \(executablePath)")
-    SYSTEM_WAIT_FOR_TERMINATION_IN_BACKGROUND(process: self)
+    SYSTEM_MONITOR_TERMINATION(process: self)
   }
 
   private static func setNonBlocking(_ fd: FileDescriptor) throws {

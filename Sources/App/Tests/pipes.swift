@@ -9,7 +9,7 @@ private struct Pipe {
   fileprivate let writeEnd: FileDescriptor
 
   fileprivate var bufferSize: Int {
-    let result = _clib_fcntl_2(self.readEnd.rawValue, _clib_F_GETPIPE_SZ)
+    let result = _clib_fcntl_2(self.readEnd.rawValue, _CLIB_F_GETPIPE_SZ)
     assert(result >= 0)
     return Int(result)
   }

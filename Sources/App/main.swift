@@ -78,12 +78,16 @@ func wait_lateCancellation() async throws {
   let process = try sleep(seconds: 2)
 
   let cancelledTask = Task.detached {
-    let status = try? await process.waitForTermination()
-    print(
-      status == nil ? "🟢" : "🔴",
-      "Exit status:",
-      status.map(String.init) ?? "nil", "<-- cancelled task"
-    )
+    do {
+      let status = try await process.waitForTermination()
+      print("🔴 Exit status:", status, "<-- cancelled task")
+    } catch {
+      if error is CancellationError {
+        print("🟢 Error:", error, "<-- cancelled task")
+      } else {
+        print("🔴 Invalid error:", error, "<-- cancelled task")
+      }
+    }
   }
 
   // Wait until it hits 'process.waitForTermination()'
@@ -186,14 +190,15 @@ func executablePath_doesNotExist() async throws {
     _ = try Subprocess(executablePath: executablePath)
     print("🔴 We somehow executed:", executablePath)
   } catch {
-    if let initError = error as? Subprocess.InitError {
-      if initError.code == .exec && (initError.source as? Errno) == Errno.noSuchFileOrDirectory {
-        print("🟢", error)
-      } else {
-        print("🔴 Invalid init error:", error)
-      }
-    } else {
+    guard let initError = error as? Subprocess.InitError else {
       print("🔴 Invalid error:", error)
+      return
+    }
+
+    if initError.code == .exec && (initError.source as? Errno) == Errno.noSuchFileOrDirectory {
+      print("🟢", error)
+    } else {
+      print("🔴 Invalid init error:", error)
     }
   }
 }
