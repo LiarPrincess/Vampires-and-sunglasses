@@ -240,9 +240,13 @@ internal func SYSTEM_MONITOR_TERMINATION(process: Subprocess) {
 /// (Unless Mort takes Death duties, but that's a spoiler.)
 private final class ThreadedMort {
 
-  // This is thread safe:
+  // Static variables are thread safe:
   // https://developer.apple.com/documentation/swift/managing-a-shared-resource-using-a-singleton
+#if swift(>=5.10)
   nonisolated(unsafe) fileprivate static let shared = ThreadedMort()
+#else
+  fileprivate static let shared = ThreadedMort()
+#endif
 
   private var pidToProcess = [pid_t: Subprocess]()
   private let lock = NSLock()
@@ -367,7 +371,13 @@ private enum Waitpid {
     self = Self.create(pid: pid, result: result, status: status)
   }
 
-  private static func create(pid: pid_t, result: __pid_t, status: CInt) -> Self {
+#if os(macOS)
+  private typealias Result = pid_t
+#elseif os(Linux)
+  private typealias Result = __pid_t
+#endif
+
+  private static func create(pid: pid_t, result: Result, status: CInt) -> Self {
     switch result {
     case 0:
       // Only possible with WNOHANG.
