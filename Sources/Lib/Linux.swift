@@ -229,7 +229,7 @@ internal protocol System_ChildWatcher {
 }
 
 /// Create the child watcher.
-/// Don't forget to call `watcher.waitpid()` or `watcher.cancel()` later!
+/// Don't forget to call `watcher.resume()` or `watcher.cancel()` later!
 ///
 /// Uppercase because Death SPEAKS IN UPPERCASE.
 /// https://en.wikipedia.org/wiki/Death_(Discworld)
@@ -254,9 +254,9 @@ internal final class System_ThreadedChildWatcher: System_ChildWatcher {
 
     fileprivate let ptr: UnsafeMutablePointer<System_ThreadedChildWatcher>
 
-    fileprivate init(_ object: System_ThreadedChildWatcher) {
+    fileprivate init(_ watcher: System_ThreadedChildWatcher) {
       self.ptr = UnsafeMutablePointer<System_ThreadedChildWatcher>.allocate(capacity: 1)
-      self.ptr.initialize(to: object)
+      self.ptr.initialize(to: watcher)
     }
 
     /// Extract `System_ThreadedChildWatcher` and deallocate.
@@ -298,7 +298,7 @@ internal final class System_ThreadedChildWatcher: System_ChildWatcher {
 #if DEBUG
     assert(
       self.hasResumedChild,
-      "[ThreadedChildWatcher] Missing call to waitpid/cancel?"
+      "[ThreadedChildWatcher] Missing call to resume/cancel?"
     )
 #endif
   }
@@ -314,12 +314,15 @@ internal final class System_ThreadedChildWatcher: System_ChildWatcher {
     // (The child is not even running…)
     watcher.lock.lock()
 
-    func cleanupAndReturn(_ message: String) -> CreateResult {
+    func cleanupAndReturnError(
+      _ message: String,
+      _ errno: Errno? = nil
+    ) -> CreateResult {
       args.deallocate()
       return .failure(InitError(
         code: .terminationWatcher,
         message: message,
-        source: Errno.current
+        source: errno
       ))
     }
 
@@ -330,7 +333,7 @@ internal final class System_ThreadedChildWatcher: System_ChildWatcher {
     // Make it detached, so that we do not have to join it.
     var result = pthread_attr_setdetachstate(&attr, CInt(PTHREAD_CREATE_DETACHED))
     if result != 0 {
-      return cleanupAndReturn("Unable to set detach attribute")
+      return cleanupAndReturnError("Unable to set detach attribute", Errno.current)
     }
 
 #if canImport(Darwin)
@@ -342,12 +345,12 @@ internal final class System_ThreadedChildWatcher: System_ChildWatcher {
 #endif
 
     if result != 0 {
-      return cleanupAndReturn("Unable to start thread")
+      return cleanupAndReturnError("Unable to start thread", Errno.current)
     }
 
 #if canImport(Darwin)
     if threadId == nil {
-      return cleanupAndReturn("Unable to start thread: no threadId")
+      return cleanupAndReturnError("Unable to start thread: no threadId")
     }
 #endif
 
